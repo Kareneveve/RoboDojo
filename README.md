@@ -8,7 +8,7 @@
 
 </div>
 
-https://private-user-images.githubusercontent.com/88101805/618534374-5b473bba-4218-44a3-a200-0bd9ee22aa55.mp4
+https://private-user-images.githubusercontent.com/88101805/619409345-cc074c5d-4567-4418-8a29-1385aaba9d5b.mp4
 
 ## ✨ Highlights
 
@@ -35,7 +35,7 @@ The [RoboDojo documentation](https://robodojo-benchmark.com/doc/) is the canonic
 | Section | Description |
 | :-- | :-- |
 | [Usage Overview](https://robodojo-benchmark.com/doc/usage/) | End-to-end walkthrough of the evaluation workflow. |
-| [Installation & Assets Downloading](https://robodojo-benchmark.com/doc/usage/install-and-download/) | Environment setup and downloading robot/object/layout assets. |
+| [Installation & Downloading (Assets and Data)](https://robodojo-benchmark.com/doc/usage/install-and-download/) | Environment setup and downloading robot/object/layout assets/training data. |
 | [Quick Evaluation](https://robodojo-benchmark.com/doc/usage/evaluation/) | Quickly dispatch XPolicyLab to run a policy for testing. |
 | [XPolicyLab](https://robodojo-benchmark.com/doc/usage/XPolicyLab/) | Integrates a large collection of policies and defines how to integrate new ones. |
 | [Simulation Tasks Details](https://robodojo-benchmark.com/doc/tasks/) | The 42 Isaac Sim tasks across five capability dimensions. |
