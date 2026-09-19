@@ -99,7 +99,7 @@ class OrganizeTableCommon:
 
     def gen_instruction(self, env_idx):
         templates = [
-            "Place the mouse on the mouse pad, push the keyboard into the frame, put the figurine on the stand, place the alarm clock on the drawer, then open the drawer and put all remaining miscellaneous items inside."
+            "Place the alarm clock on the drawer, put the figurine on the stand, place the mouse on the mouse pad, and push the keyboard into the frame."
         ]
         return templates
 
