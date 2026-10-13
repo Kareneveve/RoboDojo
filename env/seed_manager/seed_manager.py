@@ -1,17 +1,17 @@
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 import os
-from pathlib import Path
 import re
 from typing import Any, Dict, List
 
-from env.global_configs import ASSETS_PATH, BENCHMARK
+from env.benchmark import BenchmarkPaths
 from utils.load_file import *
 
 
 class SeedManager:
     def __init__(self, config: Mapping[str, Any]):
         self.config: Mapping[str, Any] = config
+        self.benchmark_paths = BenchmarkPaths.from_config(config)
         self.num_envs: int = int(self.config["num_envs"])
 
         # config fields used for directory layout
@@ -30,7 +30,7 @@ class SeedManager:
         abandoned_layout_ids: Iterable[int] | None = None,
     ):
         self.eval_seed = self.config.get("seed", 0)
-        layout_dir = Path(ASSETS_PATH, "Eval_Layout", BENCHMARK, self.config_name, str(self.eval_seed))
+        layout_dir = self.benchmark_paths.layout_dir(self.config_name, self.eval_seed)
         pattern = re.compile(rf"{re.escape(self.task_name)}_\d+\.json")
         matching_files = sorted(
             [p for p in layout_dir.iterdir() if pattern.fullmatch(p.name)],

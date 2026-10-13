@@ -13,6 +13,7 @@ from isaacsim.sensors.camera import Camera
 import numpy as np
 from numpy import ndarray
 from omegaconf import DictConfig, OmegaConf
+from pxr import Vt
 import torch
 
 from env.environment.isaac.isaac_rl_env import IsaacRLEnv
@@ -25,6 +26,7 @@ from utils.rotations import (
 
 REAL_MAP = {
     "Gemini_345Lg": GEMINI_345LG,
+    "teleop_head": TELEOP_HEAD,
     "third_view": THIRD_VIEW,
     "d435": D435,
     "large_d435": LARGE_D435,
@@ -34,6 +36,40 @@ VISUAL_MAP = {
     "pinhole": PINHOLE,
     "d435": PINHOLE,
 }
+
+
+# Tiled viewTile warps these OpenCV pinhole tokens via Max FOV. Compact form
+# ignores underscores so ``OpenCvPinhole`` and ``pinholeOpenCV`` match.
+_OPENCV_PINHOLE_MODELS = frozenset({"pinholeopencv", "opencvpinhole"})
+
+_RADIAL_DISTORTION_ATTRS = ("fthetaPolyA", "fthetaPolyB", "fthetaPolyC", "fthetaPolyD")
+_DISTORTION_ATTRS = {
+    "fisheyeKannalaBrandtK3": _RADIAL_DISTORTION_ATTRS,
+    "fisheyeRadTanThinPrism": _RADIAL_DISTORTION_ATTRS + ("p0", "p1", "s0", "s1", "s2", "s3"),
+    "pinholeOpenCV": _RADIAL_DISTORTION_ATTRS + ("p0", "p1", "s0", "s1", "s2", "s3"),
+}
+
+
+def resolve_authored_camera_resolution(camera_config, args_info) -> tuple[int, int]:
+    """Resolve an authored camera's render width/height with a type fallback."""
+
+    configured = camera_config.get("resolution")
+    resolution = args_info["resolution"] if configured is None else configured
+    if not isinstance(resolution, Sequence) or isinstance(resolution, (str, bytes)):
+        raise ValueError(f"Authored camera resolution must be a [width, height] sequence, got {resolution!r}.")
+    if len(resolution) != 2:
+        raise ValueError(f"Authored camera resolution must contain exactly width and height, got {resolution!r}.")
+    width, height = resolution
+    if (
+        isinstance(width, bool)
+        or isinstance(height, bool)
+        or not float(width).is_integer()
+        or not float(height).is_integer()
+        or int(width) <= 0
+        or int(height) <= 0
+    ):
+        raise ValueError(f"Authored camera resolution values must be positive integers, got {resolution!r}.")
+    return int(width), int(height)
 
 
 class CameraManager:
@@ -63,12 +99,37 @@ class CameraManager:
         self.cameras_xform_path: List[List[str]] = []  # List of camera xforms path
         self.cameras_xform: List[List[SingleGeometryPrim]] = []  # List of camera xforms
         self.camera_names: List[List[str]] = []  # List of camera names
+        self._owned_camera_prim_paths: set[str] = set()
+        self.enable_tiled = bool(camera_config.get("enable_tiled", False))
         self.action_noise: List[
             List[Tuple[ndarray]]
         ] = []  # Describes noise in coordinates and orientation when a camera moves, read from config
         self.camera_poses: List[List[ndarray]] = []
         self._seeds_per_env: List[int] | None = None
         self.update_env_seeds(seeds_per_env)
+
+    @staticmethod
+    def _authored_projection_model(prim) -> str:
+        for attr_name in ("omni:lensdistortion:model", "cameraProjectionType"):
+            attr = prim.GetAttribute(attr_name)
+            if attr and attr.IsValid() and attr.Get() is not None:
+                return str(attr.Get())
+        return "pinhole"
+
+    @staticmethod
+    def _is_opencv_pinhole_model(model: str) -> bool:
+        compact = model.lower().replace("_", "").replace("-", "")
+        return compact in _OPENCV_PINHOLE_MODELS
+
+    @staticmethod
+    def _is_authored_camera_config(camera_config) -> bool:
+        return camera_config.camera.get("prim_path") is not None
+
+    def _resolve_authored_camera_prim_path(self, camera_config, env_id: int) -> str:
+        path = str(camera_config.camera.prim_path).format(env_idx=env_id, env_id=env_id)
+        if not is_prim_path_valid(path):
+            raise ValueError(f"Authored camera prim does not exist: {path}")
+        return path
 
     def update_env_seeds(self, seeds: Sequence[int] | None):
         """Update per-environment seed list used for camera randomness."""
@@ -102,15 +163,19 @@ class CameraManager:
         return True
 
     def _remove_camera_prims(self):
-        """Remove existing camera prims when rebuilding after a hard scene reset."""
+        """Remove camera prims owned by this manager.
+
+        Asset-authored cameras bound through ``prim_path`` are deliberately not
+        removed; CameraManager owns only their Python/render-product handles.
+        """
         stage = get_current_stage()
-        for env_paths in self.cameras_xform_path:
-            for prim_path in env_paths:
-                if is_prim_path_valid(prim_path):
-                    try:
-                        stage.RemovePrim(prim_path)
-                    except Exception:
-                        pass
+        for prim_path in tuple(self._owned_camera_prim_paths):
+            if is_prim_path_valid(prim_path):
+                try:
+                    stage.RemovePrim(prim_path)
+                except Exception:
+                    pass
+        self._owned_camera_prim_paths.clear()
 
     def destroy(self):
         self._remove_camera_prims()
@@ -124,12 +189,14 @@ class CameraManager:
     def _rebuild_cameras(self):
         """Recreate cameras and xforms when previous handles expired."""
         self._remove_camera_prims()
-        self.cameras = []
-        self.cameras_xform_path = []
-        self.cameras_xform = []
-        self.camera_names = []
-        self.action_noise = []
-        self.camera_poses = []
+        # Preserve list identities because CaptureManager keeps references to
+        # these collections across hard scene resets.
+        self.cameras.clear()
+        self.cameras_xform_path.clear()
+        self.cameras_xform.clear()
+        self.camera_names.clear()
+        self.action_noise.clear()
+        self.camera_poses.clear()
         self.create_cameras()
 
     def initialize(self, sim: IsaacRLEnv):
@@ -175,8 +242,7 @@ class CameraManager:
                 config.pop("disable_render_product")
             if "render_frame_num" in config:
                 config.pop("render_frame_num")
-            if "enable_tiled" in config:
-                config.pop("enable_tiled")
+            self.enable_tiled = bool(config.pop("enable_tiled", False))
             if "colorize_depth" in config:
                 self.colorize_depth = config.pop("colorize_depth")
             if "default_frequency" in config:
@@ -189,7 +255,10 @@ class CameraManager:
             self.camera_config = OmegaConf.create(config)
             for camera_name, camera_config in self.camera_config.items():
                 self.camera_names[env_id].append(camera_name)
-                if camera_config.camera.get("mount_link") is not None:
+                is_authored_camera = self._is_authored_camera_config(camera_config)
+                if is_authored_camera:
+                    cur_camera_xform_path = self._resolve_authored_camera_prim_path(camera_config, env_id)
+                elif camera_config.camera.get("mount_link") is not None:
                     cur_camera_xform_path = find_unique_string_name(
                         env_name + "/" + camera_config.camera.mount_link + "/" + f"Camera_{cam_id}",
                         is_unique_fn=lambda x: not is_prim_path_valid(x),
@@ -200,6 +269,8 @@ class CameraManager:
                         is_unique_fn=lambda x: not is_prim_path_valid(x),
                     )
                 self.cameras_xform_path[env_id].append(cur_camera_xform_path)
+                if not is_authored_camera:
+                    self._owned_camera_prim_paths.add(cur_camera_xform_path)
 
                 random_cfg = None
                 if camera_name in random_config:
@@ -229,7 +300,27 @@ class CameraManager:
                 if args_info is None:
                     raise ValueError(f"Camera type {camera_config.camera.type} not found in template map.")
 
-                if camera_config.camera.mesh == "kinect":
+                if is_authored_camera:
+                    cur_camera_xform = SingleGeometryPrim(
+                        prim_path=cur_camera_xform_path,
+                        name=find_unique_string_name(
+                            camera_name,
+                            is_unique_fn=lambda x: not is_prim_path_valid(x),
+                        ),
+                        collision=False,
+                    )
+                    self.cameras_xform[env_id].append(cur_camera_xform)
+                    width, height = resolve_authored_camera_resolution(
+                        camera_config.camera,
+                        args_info,
+                    )
+                    cur_camera = Camera(
+                        prim_path=cur_camera_xform_path,
+                        resolution=(width, height),
+                        frequency=default_frequency,
+                    )
+                    self.cameras[env_id].append(cur_camera)
+                elif camera_config.camera.mesh == "kinect":
                     visual_args_info = VISUAL_MAP.get("kinect", None)
                     if visual_args_info is None:
                         raise ValueError(f"Camera type {camera_config.camera.type} not found in visual template map.")
@@ -339,6 +430,10 @@ class CameraManager:
 
                 cam_id += 1
             self.num_cams = cam_id
+        if self.enable_tiled:
+            for env_cameras in self.cameras:
+                for camera in env_cameras:
+                    self._migrate_legacy_opencv_pinhole_for_tiled(camera)
         return
 
     def _set_camera_semantics(
@@ -398,6 +493,10 @@ class CameraManager:
                     random_cfg = self.random_config.get("common", None)
 
                 cur_camera_xform = self.cameras_xform[env_id][cam_id]
+                if self._is_authored_camera_config(camera_config):
+                    self.camera_poses[env_id].append(cur_camera_xform.get_local_pose())
+                    cam_id += 1
+                    continue
                 random_pos = torch.zeros(3)
                 random_ori = torch.zeros(3)
                 # Only apply randomization if explicitly enabled (for initial setup)
@@ -451,20 +550,180 @@ class CameraManager:
         self.init_camera_pose(env_ids=env_id_list)
         self.sim.sim_step()
 
+    def _camera_prim(self, cam_id: int, env_id: int):
+        """Return the UsdGeom.Camera prim backing a camera, or None if unusable."""
+        try:
+            prim = self.cameras[env_id][cam_id].prim
+        except (AttributeError, IndexError):
+            return None
+        if prim is None or not prim.IsValid():
+            return None
+        return prim
+
+    @staticmethod
+    def _prim_float(prim, name):
+        attr = prim.GetAttribute(name)
+        if not attr or not attr.IsValid():
+            return None
+        value = attr.Get()
+        return None if value is None else float(value)
+
+    @staticmethod
+    def _read_authored_intrinsics(prim, width: int, height: int) -> np.ndarray | None:
+        """Read OpenCV K from a USD Camera prim, scaled to ``width`` × ``height``."""
+        if prim is None or not prim.IsValid():
+            return None
+
+        # Isaac authors the principal point and the calibration resolution under
+        # the ftheta.* names for every projection type, pinholeOpenCV included.
+        fx = CameraManager._prim_float(prim, "openCVFx")
+        fy = CameraManager._prim_float(prim, "openCVFy")
+        cx = CameraManager._prim_float(prim, "fthetaCx")
+        cy = CameraManager._prim_float(prim, "fthetaCy")
+        if fx is None:
+            fx = CameraManager._prim_float(prim, "omni:lensdistortion:opencvPinhole:fx")
+        if fy is None:
+            fy = CameraManager._prim_float(prim, "omni:lensdistortion:opencvPinhole:fy")
+        if cx is None:
+            cx = CameraManager._prim_float(prim, "omni:lensdistortion:opencvPinhole:cx")
+        if cy is None:
+            cy = CameraManager._prim_float(prim, "omni:lensdistortion:opencvPinhole:cy")
+        nominal_width = CameraManager._prim_float(prim, "fthetaWidth") or float(width)
+        nominal_height = CameraManager._prim_float(prim, "fthetaHeight") or float(height)
+        image_size = prim.GetAttribute("omni:lensdistortion:opencvPinhole:imageSize")
+        if image_size and image_size.IsValid() and image_size.Get() is not None:
+            size = image_size.Get()
+            if len(size) == 2 and size[0] and size[1]:
+                nominal_width, nominal_height = float(size[0]), float(size[1])
+
+        if fx is None or fy is None:
+            focal = CameraManager._prim_float(prim, "focalLength")
+            h_aperture = CameraManager._prim_float(prim, "horizontalAperture")
+            v_aperture = CameraManager._prim_float(prim, "verticalAperture")
+            if not focal or not h_aperture or not v_aperture:
+                return None
+            fx = nominal_width * focal / h_aperture
+            fy = nominal_height * focal / v_aperture
+        if cx is None or cy is None:
+            cx, cy = nominal_width / 2.0, nominal_height / 2.0
+
+        # The render product may be configured at a different resolution than
+        # the one the camera was calibrated at.
+        sx = width / nominal_width
+        sy = height / nominal_height
+        return np.array(
+            [[fx * sx, 0.0, cx * sx], [0.0, fy * sy, cy * sy], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+
+    @staticmethod
+    def _legacy_opencv_pinhole_coefficients(prim) -> list[float]:
+        """Map authored pinholeOpenCV coeffs onto the official OpenCV order."""
+        names = (
+            "fthetaPolyA",
+            "fthetaPolyB",
+            "p0",
+            "p1",
+            "fthetaPolyC",
+            "fthetaPolyD",
+            "fthetaPolyE",
+            "fthetaPolyF",
+            "s0",
+            "s1",
+            "s2",
+            "s3",
+        )
+        return [CameraManager._prim_float(prim, name) or 0.0 for name in names]
+
+    def _migrate_legacy_opencv_pinhole_for_tiled(self, camera: Camera) -> None:
+        """Move legacy ``pinholeOpenCV`` onto the tiled-supported OpenCV schema.
+
+        Non-tiled teleop uses ``rep.create.render_product`` on the same prim and
+        honors OpenCV ``fx/fy/cx/cy``. Tiled ``viewTile`` still reads the
+        deprecated ``cameraProjectionType=pinholeOpenCV`` path (Max FOV 200) and
+        warps the image. NVIDIA's replacement for that type is
+        ``OmniLensDistortionOpenCvPinholeAPI``; once applied, RTX drives
+        projection from those schema parameters on both single and tiled
+        products. Fisheye prims are left unchanged.
+
+        Do not call ``set_projection_type("pinhole")`` or
+        ``set_lens_distortion_model("pinhole")`` here: those strip the schema.
+        Do not write ``fthetaMaxFov=0``: that previously made tiled frames
+        black. Just apply the official setter, then drop the deprecated type
+        token so viewTile cannot stay on the old path.
+        """
+        if not self.enable_tiled:
+            return
+        prim = camera.prim
+        if prim is None or not prim.IsValid():
+            return
+        model = self._authored_projection_model(prim)
+        if not self._is_opencv_pinhole_model(model):
+            return
+        lens_model = prim.GetAttribute("omni:lensdistortion:model")
+        already_official = lens_model and lens_model.IsValid() and str(lens_model.Get() or "") == "opencvPinhole"
+        width, height = camera.get_resolution()
+        K = self._read_authored_intrinsics(prim, width, height)
+        if K is None:
+            return
+        if not already_official:
+            camera.set_opencv_pinhole_properties(
+                cx=float(K[0, 2]),
+                cy=float(K[1, 2]),
+                fx=float(K[0, 0]),
+                fy=float(K[1, 1]),
+                pinhole=self._legacy_opencv_pinhole_coefficients(prim),
+            )
+        proj = prim.GetAttribute("cameraProjectionType")
+        if proj and proj.IsValid():
+            proj.Set(Vt.Token("pinhole"))
+
+    def _authored_camera_intrinsics(self, cam_id: int, env_id: int, width: int, height: int) -> np.ndarray | None:
+        """Read the calibration authored on a USD Camera prim.
+
+        Returns None when the prim carries no usable calibration, so the caller
+        can fall back to the camera-type template.
+        """
+        return self._read_authored_intrinsics(self._camera_prim(cam_id, env_id), width, height)
+
     def get_camera_intrinsics(self, cam_id: int, env_id: int = 0) -> np.ndarray:
         """
-        Return 3x3 intrinsic matrix K for the given camera, computed from config params.
-        Falls back to identity if the camera type has no focal/aperture info (e.g. Kinect USD).
+        Return 3x3 intrinsic matrix K for the given camera.
+
+        A camera bound to an authored USD prim carries its own calibration, which
+        takes precedence over the coarse camera-type template. Falls back to
+        identity if neither source has focal/aperture info (e.g. Kinect USD).
         """
         camera_name = self.camera_names[env_id][cam_id]
         camera_cfg = self.camera_config[camera_name]
         args_info = REAL_MAP.get(camera_cfg.camera.type, None)
+
+        if args_info is not None and self._is_authored_camera_config(camera_cfg):
+            width, height = resolve_authored_camera_resolution(camera_cfg.camera, args_info)
+            intrinsics = self._authored_camera_intrinsics(cam_id, env_id, width, height)
+            if intrinsics is not None:
+                return intrinsics
+
         if args_info is None or "focal_length" not in args_info or "horizontal_aperture" not in args_info:
             return np.eye(3, dtype=np.float64)
         width, height = args_info["resolution"]
         fx = (width * args_info["focal_length"]) / args_info["horizontal_aperture"]
         cx, cy = width / 2.0, height / 2.0
         return np.array([[fx, 0, cx], [0, fx, cy], [0, 0, 1]], dtype=np.float64)
+
+    def get_camera_distortion(self, cam_id: int, env_id: int = 0) -> dict:
+        """Return the authored lens model and coefficients in MiVerse order."""
+        prim = self._camera_prim(cam_id, env_id)
+        model = None if prim is None else self._authored_projection_model(prim)
+        if model is not None and self._is_opencv_pinhole_model(model):
+            model = "pinholeOpenCV"
+        names = _DISTORTION_ATTRS.get(model)
+        coefficients = (
+            np.zeros(4, dtype=np.float64)
+            if prim is None or names is None
+            else np.array([self._prim_float(prim, name) or 0.0 for name in names], dtype=np.float64)
+        )
+        return {"distortion_model": model or "pinhole", "distortion_coefficients": coefficients}
 
     def get_camera_extrinsics(self, cam_id: int, env_id: int) -> np.ndarray:
         """
@@ -474,8 +733,12 @@ class CameraManager:
         """
         camera_xform = self.cameras_xform[env_id][cam_id]
         pos, quat = camera_xform.get_world_pose()
-        pos = pos.cpu().numpy().astype(np.float64)
-        quat = quat.cpu().numpy().astype(np.float64)
+        if isinstance(pos, torch.Tensor):
+            pos = pos.detach().cpu().numpy()
+        if isinstance(quat, torch.Tensor):
+            quat = quat.detach().cpu().numpy()
+        pos = np.asarray(pos, dtype=np.float64).reshape(-1)
+        quat = np.asarray(quat, dtype=np.float64).reshape(-1)
         w, x, y, z = quat[0], quat[1], quat[2], quat[3]
         R = np.array(
             [

@@ -12,7 +12,9 @@ import omni.usd
 from pxr import Gf, Sdf, Usd, UsdGeom
 import torch
 
+from env.environment.isaac.physx_device import align_isaacsim_view_to_physx
 from env.scene_manager.layout_manager import LayoutManager
+from env.scene_manager.objects.env_origin import shift_by_origin, store_env_origin
 
 
 class RigidObject(SingleRigidPrim, SingleGeometryPrim):
@@ -54,9 +56,7 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         self.visual_config = self.instance_config.get("visual", {})
         self.physics_config = self.instance_config.get("physics", {})
 
-        self.env_origin = env_origin
-        if isinstance(self.env_origin, torch.Tensor):
-            self.env_origin = self.env_origin.cpu().numpy().tolist()
+        self.env_origin = store_env_origin(env_origin)
         self.usd_path = usd_path
         self.usd_prim_path = prim_path
         self.default_pos = default_pos
@@ -165,10 +165,7 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
     def get_bbox(self, is_relative=True):
         points_world, points_local, pos_world, ori_world = self.sample_mesh_vertices()
 
-        if is_relative:
-            pos = np.subtract(pos_world, self.env_origin)
-        else:
-            pos = pos_world
+        pos = shift_by_origin(pos_world, self.env_origin, relative=is_relative)
         ori = ori_world
         bbox = np.concatenate([points_local.min(axis=0), points_local.max(axis=0)])
         return pos, ori, bbox
@@ -237,6 +234,7 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
     def initialize(self):
         self.physics_sim_view = SimulationManager.get_physics_sim_view()
         super().initialize(physics_sim_view=self.physics_sim_view)
+        align_isaacsim_view_to_physx(self)
 
     def _apply_default_velocities(self):
         """Re-apply default linear/angular velocity if configured."""

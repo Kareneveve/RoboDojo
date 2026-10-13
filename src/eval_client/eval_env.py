@@ -1,6 +1,6 @@
 from copy import deepcopy
 from datetime import datetime
-import importlib
+from functools import cache
 import inspect
 import json
 import os
@@ -10,10 +10,11 @@ import numpy as np
 import transforms3d as t3d
 import websockets
 
+from env.benchmark import BenchmarkPaths
 from env.global_configs import *
-from env.global_configs import BENCHMARK
 from env.observation_manager.obs_manager import ObsManager
 from env.seed_manager.seed_manager import SeedManager
+from task import task_registry
 from utils.cluttered_generator import UnStableError
 from utils.pipeline_utils import get_robot_action_dim_info
 from utils.save_file import VideoStreamWriter, format_video_saved_message, save_json
@@ -40,19 +41,26 @@ def _patch_websockets_proxy_compat():
     websockets.connect = connect_without_proxy
 
 
-def create_eval_env(config, app, resume_state=None, **kwargs):
+def resolve_task_class(config):
     task_name = config.eval_cfg.get("task_name", None)
     if task_name is None:
         raise ValueError("Task name must be specified in eval_cfg!")
 
-    task_registry = importlib.import_module(f"task.{BENCHMARK}.task_registry")
-    task_name, task_class = task_registry.load_task_class(task_name)
+    benchmark_paths = BenchmarkPaths.from_config(config.eval_cfg)
+    task_name, task_class = task_registry.load_task_class(task_name, benchmark=benchmark_paths.name)
     config.eval_cfg["task_name"] = task_name
+    return task_class
+
+
+@cache
+def build_eval_env_class(task_class):
+    """Share the task's evaluation lifecycle with specialized evaluators."""
 
     class EvalEnv(task_class):
         def __init__(self, config, app, resume_state=None, **kwargs):
             super().__init__(config, app, **kwargs)
             self.eval_cfg = config.eval_cfg
+            self.benchmark_paths = BenchmarkPaths.from_config(self.eval_cfg)
             self.config_name = self.eval_cfg.get("config_name", None)
             self.task_name = self.eval_cfg.get("task_name", None)
             self.eval_batch = self.eval_cfg.get("eval_batch", False)
@@ -77,15 +85,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                 os.environ["ROBODOJO_RUN_ID"] = run_id
             self.run_id = run_id
-            self.save_dir = os.path.join(
-                "eval_result",
-                f"{BENCHMARK}",
-                self.task_name,
-                self.policy_name,
-                self.config_name,
-                str(self.eval_seed) + "_" + self.additional_info,
-                run_id,
-            )
+            self.save_dir = str(self.benchmark_paths.result_dir(self.eval_cfg) / run_id)
 
             if resume_state is not None:
                 resumed_save_dir = resume_state.get("save_dir")
@@ -658,15 +658,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             never overwrite each other's manifest while still being easy to
             locate by humans.
             """
-            return os.path.join(
-                "eval_result",
-                f"{BENCHMARK}",
-                self.task_name,
-                self.policy_name,
-                self.config_name,
-                str(self.eval_seed) + "_" + self.additional_info,
-                f"_resume_{self.run_id}.json",
-            )
+            return str(self.benchmark_paths.resume_manifest_path(self.eval_cfg, self.run_id))
 
         def persist_resume_manifest(self, restart_count: int = 0) -> str:
             """Atomically persist enough state to resume after process death.
@@ -891,7 +883,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 if cam_key not in writers:
                     height, width, channels = color.shape
                     tmp_path = os.path.join(self._stream_dir, f"env{env_idx}_{cam_key}.tmp.mp4")
-                    writers[cam_key] = VideoStreamWriter(tmp_path, height, width, channels, fps=fps)
+                    writers[cam_key] = VideoStreamWriter(tmp_path, height, width, channels, fps=fps, queue_size=2)
                 writers[cam_key].append(color)
 
         def _sweep_stream_dir(self):
@@ -920,15 +912,21 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
         def save_video(self, env_idx, video_path, tag):
             writers = self.video_writers.pop(env_idx, {})
+            # Let all encoders drain concurrently before waiting for any one.
+            for writer in writers.values():
+                try:
+                    writer.request_close()
+                except Exception:
+                    pass
             for cam_key, writer in writers.items():
                 tmp_path = writer.out_path
-                final_path = video_path.replace(".mp4", f"_{cam_key}_{tag}.mp4")
                 try:
                     writer.close(announce=False)
                 except Exception as e:
                     print(f"[EvalEnv] Failed to finalize video for env {env_idx} cam {cam_key}: {e}")
                     writer.abort()
                     continue
+                final_path = video_path.replace(".mp4", f"_{cam_key}_{tag}.mp4")
                 os.makedirs(os.path.dirname(final_path), exist_ok=True)
                 os.replace(tmp_path, final_path)
                 print(
@@ -951,4 +949,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 env_idx_list = list(range(self.num_envs))
             return self.robot_manager.control_manager.get_empty(env_idx_list=env_idx_list)
 
-    return EvalEnv(config, app, resume_state=resume_state, **kwargs)
+    return EvalEnv
+
+
+def create_eval_env(config, app, resume_state=None, **kwargs):
+    return build_eval_env_class(resolve_task_class(config))(config, app, resume_state=resume_state, **kwargs)

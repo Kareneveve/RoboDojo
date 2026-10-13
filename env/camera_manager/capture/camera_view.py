@@ -6,11 +6,14 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 #
+import math
 from typing import Any, List, Tuple
 
 from isaacsim.core.prims import XFormPrim
+from isaacsim.core.utils.stage import get_current_stage
 import numpy as np
 import omni.replicator.core as rep
+from pxr import UsdGeom
 import torch
 import warp as wp
 
@@ -196,6 +199,7 @@ class CameraView(XFormPrim):
         self._annotators = dict()
         self.camera_resolution = camera_resolution
         self._tiled_render_product = None
+        self._pad_prim_paths: List[str] = []
         self._setup_tiled_sensor()
 
     def __del__(self):
@@ -204,11 +208,87 @@ class CameraView(XFormPrim):
 
     def _clean_up_tiled_sensor(self):
         """Clean up the sensor by detaching annotators and destroying render products, and removing related prims."""
-        if self._tiled_render_product is not None:
-            # detach annotators from render product
-            self._tiled_annotator.detach([self._tiled_render_product.path])
-            # delete tiled render products
-            self._tiled_render_product.destroy()
+        render_product = getattr(self, "_render_product", None) or getattr(self, "_tiled_render_product", None)
+        if render_product is not None:
+            for annotator in getattr(self, "_annotators", {}).values():
+                try:
+                    annotator.detach([render_product.path])
+                except Exception:
+                    pass
+            try:
+                render_product.destroy()
+            except Exception:
+                pass
+        self._render_product = None
+        self._tiled_render_product = None
+        self._remove_pad_cameras()
+
+    def _remove_pad_cameras(self):
+        stage = get_current_stage()
+        for path in getattr(self, "_pad_prim_paths", []):
+            try:
+                if stage.GetPrimAtPath(path).IsValid():
+                    stage.RemovePrim(path)
+            except Exception:
+                pass
+        self._pad_prim_paths = []
+
+    @staticmethod
+    def _square_tiled_camera_count(num_cameras: int) -> int:
+        side = math.ceil(math.sqrt(max(1, num_cameras)))
+        return side * side
+
+    def _has_lens_distortion(self) -> bool:
+        """Detect both modern lens schemas and legacy distorted projections.
+
+        Plain pinhole cameras need no padding. A view normally contains one
+        camera type across environments, but inspect every valid prim so a
+        mixed view cannot accidentally skip the workaround.
+        """
+        stage = get_current_stage()
+        for path in self.prim_paths:
+            prim = stage.GetPrimAtPath(str(path))
+            if prim is None or not prim.IsValid():
+                continue
+            model = prim.GetAttribute("omni:lensdistortion:model")
+            if model and model.IsValid():
+                token = str(model.Get() or "").replace("_", "").lower()
+                if token not in {"", "pinhole", "perspective"}:
+                    return True
+            proj = prim.GetAttribute("cameraProjectionType")
+            if proj and proj.IsValid():
+                token = str(proj.Get() or "").replace("_", "").lower()
+                if token.startswith("fisheye") or token in {"pinholeopencv", "opencvpinhole"}:
+                    return True
+        return False
+
+    def _padded_tiled_camera_paths(self) -> List[str]:
+        """Add unique dummy cameras so the atlas is a square grid.
+
+        Workaround for isaac-sim/IsaacSim#488 on Kit 107. Only used when
+        this view has lens distortion, including legacy fisheye projections.
+        Revalidate before removing this workaround on newer Kit versions.
+        Dummy cameras must be distinct prims: repeating the last env path
+        makes Hydra reject the render product.
+        ``get_data`` still returns only ``len(self.prims)`` real cameras.
+        """
+        paths = [str(path) for path in self.prim_paths]
+        if not paths or not self._has_lens_distortion():
+            return paths
+        extra = self._square_tiled_camera_count(len(paths)) - len(paths)
+        if extra <= 0:
+            return paths
+        stage = get_current_stage()
+        root = f"/World/TiledPad/{self.name}"
+        stage.DefinePrim(root, "Xform")
+        for i in range(extra):
+            path = f"{root}/pad_{i}"
+            if stage.GetPrimAtPath(path).IsValid():
+                stage.RemovePrim(path)
+            UsdGeom.Camera.Define(stage, path)
+            self._pad_prim_paths.append(path)
+            paths.append(path)
+        return paths
 
     def _get_tiled_resolution(self, num_cameras, resolution) -> Tuple[int, int]:
         """Calculate the resolution for the tiled sensor based on the number of cameras and individual camera resolution.
@@ -229,9 +309,10 @@ class CameraView(XFormPrim):
         """Set up the tiled sensor, compute resolutions, attach annotators, and initiate the render process."""
         self._clean_up_tiled_sensor()
 
-        self.tiled_resolution = self._get_tiled_resolution(len(self.prims), self.camera_resolution)
+        tiled_cameras = self._padded_tiled_camera_paths()
+        self.tiled_resolution = self._get_tiled_resolution(len(tiled_cameras), self.camera_resolution)
         self._render_product = rep.create.render_product_tiled(
-            cameras=self.prim_paths,
+            cameras=tiled_cameras,
             tile_resolution=self.camera_resolution,
             name=f"{self.name}_tiled_sensor",
         )

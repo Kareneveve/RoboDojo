@@ -43,6 +43,11 @@ def resolve_mdl_paths(mdl_path_or_folder: str) -> List[str]:
     return []
 
 
+def ground_spawn_enabled(config) -> bool:
+    """Return whether the configured Ground should create USD geometry."""
+    return bool(config.get("spawn", True))
+
+
 class Ground:
     """Ground plane with material domain randomization.
 
@@ -58,6 +63,9 @@ class Ground:
             - position: Ground plane position (default [0, 0, 0])
             - thickness: Ground plane thickness (default 0.1)
             - geometry: Geometry type for ground (default "cube", options: "cube", "plane")
+            - spawn: Whether to create visible/collision USD geometry (default true).
+              When false, LayoutManager can still use this Ground as a virtual
+              support plane for object placement.
     """
 
     def __init__(self, prim_path: str, config: DictConfig, env_spacing: float):
@@ -72,7 +80,8 @@ class Ground:
         self.prim_path = prim_path
         self.config = config
         self.env_spacing = env_spacing
-        self.stage = get_current_stage()
+        self.spawn_enabled = ground_spawn_enabled(config)
+        self.stage = get_current_stage() if self.spawn_enabled else None
 
         # Extract configuration parameters
         self.axis = config.get("axis", "Z")
@@ -82,7 +91,7 @@ class Ground:
         self.geometry_type = config.get("geometry", "cube")  # cube or plane
 
         # Material randomization configuration
-        self.materials = config.get("materials", None)
+        self.materials = config.get("materials", None) if self.spawn_enabled else None
         # Process materials to expand folder paths
         if self.materials:
             self.materials = self._process_material_configs(self.materials)
@@ -99,8 +108,9 @@ class Ground:
         # Geometry wrapper (will be set in create)
         self.geometry_prim = None
 
-        self.create()
-        self.initialize()
+        if self.spawn_enabled:
+            self.create()
+            self.initialize()
 
     def _process_material_configs(self, material_configs: List[Dict]) -> List[Dict]:
         """Process material configurations to expand folder paths into individual files.
@@ -146,6 +156,9 @@ class Ground:
 
     def create(self):
         """Create the ground plane in the USD stage."""
+        if not self.spawn_enabled:
+            return
+
         # Prepare physics material
         physics_material_path = find_unique_string_name(
             initial_name=f"{self.prim_path}/physics_material",
@@ -390,10 +403,14 @@ class Ground:
 
     def initialize(self):
         """Initialize the ground with the configuration after the first scene reload."""
+        if not self.spawn_enabled:
+            return
         self.reset()
 
     def reset(self):
         """Apply the saved ground configuration and perform material randomization."""
+        if not self.spawn_enabled:
+            return
         if self.use_material_randomization:
             self._randomize_material()
 

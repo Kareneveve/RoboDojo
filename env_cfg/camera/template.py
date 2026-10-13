@@ -5,6 +5,13 @@ GEMINI_345LG = {
     "vertical_aperture": 14.266,
     "clipping_range": (0.005, 10.0),
 }
+TELEOP_HEAD = {
+    "resolution": (640, 480),
+    "focal_length": 10.0,
+    "horizontal_aperture": 26.206,
+    "vertical_aperture": 14.424,
+    "clipping_range": (0.005, 10.0),
+}
 THIRD_VIEW = {
     "resolution": (640, 480),
     "focal_length": 13.0,

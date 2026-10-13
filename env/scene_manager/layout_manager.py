@@ -15,7 +15,9 @@ from shapely.geometry import box
 import torch
 import transforms3d as t3d
 
+from env.benchmark import BenchmarkPaths
 from env.global_configs import *
+from env.scene_manager.stability import StabilityLimits, layout_pose_reference, pose_is_stable
 from env.seeding import seed_everywhere
 from utils.cluttered_generator import ClutteredGenerator
 from utils.load_file import *
@@ -60,7 +62,9 @@ class LayoutManager:
         seeds_per_env: List[int] = None,
         scene_config: DictConfig = None,
         task_config: DictConfig = None,
+        benchmark: str = BENCHMARK,
     ):
+        self.objects_path = str(BenchmarkPaths(benchmark).objects_dir)
         self.scene_manager = None
         self._far_idx = 0
         self.num_envs = num_envs
@@ -162,11 +166,11 @@ class LayoutManager:
                         prim_path, inst_name = self._generate_object_paths(env_idx, cat, cat_idx, type=key.lower())
                         if key in ["Rigid", "Dynamic", "Garment", "Articulation", "Geometry", "Fluid"]:
                             if "type" in inst and inst["type"] == "cluttered":
-                                usd_path = f"{OBJECTS_PATH}/Clutter/{cat}/{cat_idx:05d}/object.usdz"
+                                usd_path = f"{self.objects_path}/Clutter/{cat}/{cat_idx:05d}/object.usdz"
                             else:
-                                usd_path = f"{OBJECTS_PATH}/{key}/{cat}/{cat_idx:05d}/object.usdz"
+                                usd_path = f"{self.objects_path}/{key}/{cat}/{cat_idx:05d}/object.usdz"
                             if not os.path.exists(usd_path):
-                                usd_path = f"{OBJECTS_PATH}/{key}/{cat}/{cat_idx:05d}/object.usd"
+                                usd_path = f"{self.objects_path}/{key}/{cat}/{cat_idx:05d}/object.usd"
                         if "visual" in inst:
                             visual_cfg = inst.get("visual")
                             if isinstance(visual_cfg, DictConfig):
@@ -183,9 +187,9 @@ class LayoutManager:
                         inst["usd_path"] = usd_path
                         inst["inst_name"] = inst_name
                         if "type" in inst and inst["type"] == "cluttered":
-                            modeldir = f"{OBJECTS_PATH}/Clutter/{cat}"
+                            modeldir = f"{self.objects_path}/Clutter/{cat}"
                         else:
-                            modeldir = f"{OBJECTS_PATH}/{key}/{cat}"
+                            modeldir = f"{self.objects_path}/{key}/{cat}"
                         data = load_object_metadata(modeldir, cat_idx)
                         data["model_name"] = cat
                         data["model_id"] = cat_idx
@@ -419,6 +423,7 @@ class LayoutManager:
         return label_list
 
     def get_instance_pose(self, env_idx: int, label: str = None, inst_name: str = None, relative: bool = True):
+        """Return CPU NumPy position and wxyz orientation, local to the env by default."""
         if inst_name is None:
             inst_name = self.get_instance_name(env_idx, label)
         if inst_name is None:
@@ -426,18 +431,33 @@ class LayoutManager:
             return (None, None)
         instance_type = self.instance_type_by_env[env_idx].get(inst_name, None)
         obj = self.get_scene_object(env_idx, inst_name)
+        if obj is None:
+            return (None, None)
+
+        def as_numpy(value):
+            if isinstance(value, torch.Tensor):
+                value = value.detach().cpu().numpy()
+            return np.asarray(value, dtype=np.float32).reshape(-1).copy()
+
         if instance_type in ["rigid", "articulation"]:
-            pos, rot, device = obj._get_object_transform()
+            pos, rot, _device = obj._get_object_transform()
+            pos, rot = as_numpy(pos), as_numpy(rot)
             if not relative:
-                env_pos = deepcopy(self.scene_manager.env_origins[env_idx]).to(device)
-                pos = pos + env_pos
+                pos = pos + as_numpy(self.scene_manager.env_origins[env_idx])
+            return (pos, rot)
+        elif instance_type == "dynamic":
+            pos, rot = obj.get_physics_root_world_pose()
+            pos, rot = as_numpy(pos), as_numpy(rot)
+            if relative:
+                pos = pos - as_numpy(self.scene_manager.env_origins[env_idx])
             return (pos, rot)
         elif instance_type in ["garment", "geometry"]:
             state = obj.get_state(is_relative=True)
-            root_pose = state["root_pose"].detach().cpu().numpy()
+            root_pose = as_numpy(state["root_pose"])
             pos = root_pose[:3]
             rot = root_pose[3:]
             return (pos, rot)
+        return (None, None)
 
     def get_label_descriptions(self, env_idx, label=None, inst_name=None):
         metadata = self.get_instance_metadata(env_idx=env_idx, label=label, inst_name=inst_name)
@@ -577,34 +597,64 @@ class LayoutManager:
                         )
         return (result_list, radius)
 
-    def check_layout_stability(self, env, render=False):
+    def _get_support_height(self, env_idx, obj):
+        """Read replay support frames without rebuilding collection placement generators."""
+        frame = obj.get("relative_plane_frame")
+        if frame is None or np.allclose(np.asarray(frame).reshape(7), [0, 0, 0, 1, 0, 0, 0]):
+            frame = (obj.get("virtual_support") or {}).get("frame")
+        if frame is None:
+            plane = str(obj.get("relative_plane") or "Table")
+            plane = {"table": "Table", "ground": "Ground"}.get(plane.lower(), plane)
+            frame = self.cluttered_generator[plane][env_idx].frame
+        return float(frame[2])
+
+    def check_layout_stability(self, env, render=False, maxstep=300, window=100, limits=None, window_limits=None):
+        """Check settling, optionally using authored poses and explicit evaluation limits.
+
+        Calls without limits retain RoboDojo's first-step baseline and axis-wise
+        distance checks. Explicit limits use saved support planes and XY distance.
+        """
+        if maxstep <= 1 or not 0 < window < maxstep:
+            raise ValueError("Layout stability requires maxstep > 1 and 0 < window < maxstep.")
+        use_layout_reference = limits is not None or window_limits is not None
+        if use_layout_reference:
+            limits = StabilityLimits() if limits is None else limits
+            window_limits = StabilityLimits(angle_deg=10.0) if window_limits is None else window_limits
         first_pose = []
         stable = []
         unstable = []
         history_pose = []
-        window_success_actor = []
+        support_heights = []
         for env_idx in range(self.num_envs):
             actors = []
+            actor_reference = {}
+            actor_support_heights = {}
             for object_type in ["Rigid", "Articulation"]:
                 for obj in self.object_records_by_type[object_type].layout_records_by_env[env_idx]:
                     check = True
-                    relative_plane = obj.get("relative_plane", None)
-                    relative_plane = relative_plane.split("/")[0]
+                    relative_plane = str(obj.get("relative_plane") or "Table").split("/")[0]
                     if not obj.get("need_check_stable", True):
                         check = False
-                    if relative_plane is not None and relative_plane not in ["table", "ground"]:
+                    if relative_plane.lower() not in ["table", "ground"]:
                         inst_name = self.get_instance_name(env_idx, relative_plane)
                         physics_type = self.instance_type_by_env[env_idx].get(inst_name, None)
                         if physics_type == "dynamic":
                             check = False
                     if check:
-                        actors.append(obj["inst_name"])
-            first_pose.append({})
+                        actor = obj["inst_name"]
+                        actors.append(actor)
+                        if use_layout_reference:
+                            pos, rot = self.get_instance_pose(env_idx=env_idx, inst_name=actor)
+                            actor_reference[actor] = layout_pose_reference(
+                                obj, current_position=pos, current_orientation=rot
+                            )
+                            actor_support_heights[actor] = self._get_support_height(env_idx, obj)
+            first_pose.append(actor_reference)
             stable.append(set(actors))
             unstable.append([])
             history_pose.append({})
             history_pose[env_idx] = {actor: [] for actor in set(actors)}
-            window_success_actor.append([])
+            support_heights.append(actor_support_heights)
 
         def rot_diff(r1, r2):
             return np.abs(cal_quat_dis(r1, r2) * 180 / np.pi)
@@ -617,18 +667,26 @@ class LayoutManager:
                 rot = rot.cpu().numpy().flatten()
             return (pos, rot)
 
-        def is_stable(prev_pos, prev_rot, cur_pos, cur_rot, angle=5, eps=0.04):
+        def is_stable(prev_pos, prev_rot, cur_pos, cur_rot, env_idx, actor, *, final_window=False):
+            if use_layout_reference:
+                return pose_is_stable(
+                    prev_pos,
+                    prev_rot,
+                    cur_pos,
+                    cur_rot,
+                    support_height=support_heights[env_idx][actor],
+                    limits=window_limits if final_window else limits,
+                )
+            angle = 10 if final_window else 30
             if rot_diff(prev_rot, cur_rot) > angle:
                 return False
             delta = np.abs(cur_pos - prev_pos)
-            if any(delta > eps):
+            if any(delta > 0.04):
                 return False
             if cur_pos[2] < self.table_info[env_idx].get("height", 0.765) - 0.05:
                 return False
             return True
 
-        maxstep = 300
-        window = 100
         unstable_envs = []
         for step in range(maxstep):
             env.sim_step(render=render)
@@ -642,10 +700,10 @@ class LayoutManager:
                     continue
                 for actor in list(stable[env_idx]):
                     pos, rot = get_pose(actor, env_idx)
-                    if step == 0:
+                    if step == 0 and not use_layout_reference:
                         first_pose[env_idx][actor] = (pos, rot)
                         continue
-                    if not is_stable(first_pose[env_idx][actor][0], first_pose[env_idx][actor][1], pos, rot, angle=30):
+                    if not is_stable(*first_pose[env_idx][actor], pos, rot, env_idx, actor):
                         stable[env_idx].remove(actor)
                         unstable[env_idx].append(actor)
                     history_pose[env_idx][actor].append((pos, rot))
@@ -656,7 +714,7 @@ class LayoutManager:
                     for actor in list(stable[env_idx]):
                         prev_pos, prev_rot = history_pose[env_idx][actor][maxstep - window - 1]
                         cur_pos, cur_rot = history_pose[env_idx][actor][-1]
-                        if not is_stable(prev_pos, prev_rot, cur_pos, cur_rot, angle=10):
+                        if not is_stable(prev_pos, prev_rot, cur_pos, cur_rot, env_idx, actor, final_window=True):
                             stable[env_idx].remove(actor)
                             unstable[env_idx].append(actor)
                             unstable_envs.append(env_idx)
@@ -777,7 +835,7 @@ class LayoutManager:
     def _get_category_indices(self, cat_name: List[str], type: str) -> List[List[int]]:
         cat_idx = []
         for name in cat_name:
-            modeldir = os.path.join(OBJECTS_PATH, type, name)
+            modeldir = os.path.join(self.objects_path, type, name)
             if not os.path.isdir(modeldir):
                 cat_idx.append([])
                 continue

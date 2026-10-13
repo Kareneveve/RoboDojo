@@ -1,13 +1,29 @@
 import argparse
 from datetime import datetime
-import importlib
 import json
 import os
+import signal
 import sys
 
 from isaaclab.app import AppLauncher
 
 MAX_INPROC_RESTARTS = 3
+
+
+class EvalAppLauncher(AppLauncher):
+    """Apply the evaluation signal-exit policy without changing IsaacLab."""
+
+    def _abort_signal_handle_callback(self, signum, frame):
+        """Terminate signal-triggered shutdown without invoking Kit cleanup."""
+        if getattr(self, "_abort_signal_handled", False):
+            os._exit(1)
+        self._abort_signal_handled = True
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+        except Exception:
+            pass
+        os._exit(1)
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--task_name", type=str)
@@ -63,11 +79,15 @@ parser.add_argument("--seed", type=int, required=True, help="policy seed for eva
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
-# Safe to import before AppLauncher: env is a namespace package (no __init__)
-# and GLOBAL_CONFIGS only imports os, so this pulls in no app-dependent code.
-from env.global_configs import BENCHMARK, ROOT_DIR
+# Resolve the profile before choosing the task config used by the monitor.
+# These helpers do not import any app-dependent simulation modules.
+from env.benchmark import BenchmarkPaths
+from env.global_configs import ENV_CONFIG_PATH, ROOT_DIR
+from task import task_registry
+from utils.load_file import load_yaml
 
-task_registry = importlib.import_module(f"task.{BENCHMARK}.task_registry")
+eval_profile = load_yaml(os.path.join(ENV_CONFIG_PATH, args_cli.env_cfg_type + ".yml"))
+benchmark_paths = BenchmarkPaths.from_config(eval_profile)
 
 
 class PhysXBrokenError(Exception):
@@ -89,7 +109,7 @@ def _physx_monitor_needed(task_name) -> bool:
     lightweight yaml load before AppLauncher; any failure falls back to
     enabled (fail-safe).
     """
-    cfg_path = task_registry.task_config_path(os.path.join(ROOT_DIR, "task", BENCHMARK, "config"), task_name)
+    cfg_path = task_registry.task_config_path(benchmark_paths.config_dir, task_name)
     try:
         import yaml
 
@@ -126,7 +146,7 @@ from env.camera_manager.capture.render_sync import add_zero_delay_kit_args
 add_zero_delay_kit_args(args_cli)
 
 # launch omniverse app
-app_launcher = AppLauncher(args_cli)
+app_launcher = EvalAppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 from omegaconf import OmegaConf
@@ -134,10 +154,7 @@ from omegaconf import OmegaConf
 from env.global_configs import *
 from src.eval_client.eval_env import create_eval_env
 from utils.cluttered_generator import UnStableError
-from utils.load_file import load_yaml
 from utils.pipeline_utils import *
-
-BENCHMARK_PATH = os.path.join(ROOT_DIR, "task", BENCHMARK)
 
 
 def _eval_batch_from_deploy(policy_name):
@@ -147,19 +164,8 @@ def _eval_batch_from_deploy(policy_name):
 
 
 def _resume_manifest_path(eval_cfg, run_id):
-    """Mirror of EvalEnv.resume_manifest_path() so we can load BEFORE
-    constructing the env. Keeping the layout aligned avoids drift between
-    the writer and reader paths.
-    """
-    return os.path.join(
-        "eval_result",
-        BENCHMARK,
-        eval_cfg["task_name"],
-        eval_cfg["policy_name"],
-        eval_cfg["config_name"],
-        f"{eval_cfg.get('seed', 0)}_{eval_cfg.get('additional_info', '')}",
-        f"_resume_{run_id}.json",
-    )
+    """Use the same benchmark-scoped path as the EvalEnv writer."""
+    return str(BenchmarkPaths.from_config(eval_cfg).resume_manifest_path(eval_cfg, run_id))
 
 
 def _load_resume_manifest(eval_cfg, run_id):
@@ -257,8 +263,7 @@ def main():
     """
     task_name = args_cli.task_name
     num_envs = args_cli.num_envs
-    eval_cfg_name = args_cli.env_cfg_type
-    eval_cfg = load_yaml(os.path.join(ENV_CONFIG_PATH, eval_cfg_name + ".yml"))
+    eval_cfg = dict(eval_profile)
     eval_cfg["task_name"] = task_name
     eval_cfg["num_envs"] = num_envs
     eval_cfg["device_id"] = args_cli.device_id
@@ -303,7 +308,7 @@ def main():
                     eval_cfg["config"]["robot"] + ".yml",
                 )
             ),
-            "task_env": load_yaml(task_registry.task_config_path(os.path.join(BENCHMARK_PATH, "config"), task_name)),
+            "task_env": load_yaml(task_registry.task_config_path(benchmark_paths.config_dir, task_name)),
             "eval_cfg": eval_cfg,
             "deploy_cfg": deploy_cfg,
         }
@@ -324,14 +329,15 @@ def main():
     eval_cfg["num_envs"] = num_envs
     OmegaConf.update(env_cfg, "sim.scene.num_envs", num_envs, force_add=True)
     OmegaConf.update(env_cfg, "eval_cfg.num_envs", num_envs, force_add=True)
-    env_cfg = process_randomization(env_cfg)
     env_cfg, eval_num = process_config(env_cfg, task_name=task_name)
+    env_cfg = process_randomization(env_cfg)
 
     if os.environ.get("EVAL_NUM"):
         _env_eval_num = os.environ.get("EVAL_NUM")
         if str(_env_eval_num).lower() != "native":
             eval_num = min(int(_env_eval_num), int(eval_num))
     eval_cfg["eval_num"] = eval_num
+    OmegaConf.update(env_cfg, "eval_cfg.eval_num", eval_num, force_add=True)
 
     OmegaConf.update(
         env_cfg,
@@ -343,7 +349,12 @@ def main():
     env_cfg.sim.seed = [0 for _ in range(num_envs)]
     run_id = os.environ["ROBODOJO_RUN_ID"]
     resume_state = _load_resume_manifest(eval_cfg, run_id)
-    env = create_eval_env(env_cfg, simulation_app, resume_state=resume_state)
+    if benchmark_paths.name == "MiVerse":
+        from src.eval_client.nav_eval_env import create_nav_eval_env
+
+        env = create_nav_eval_env(env_cfg, simulation_app, resume_state=resume_state)
+    else:
+        env = create_eval_env(env_cfg, simulation_app, resume_state=resume_state)
     eval_time = env.success_nums + env.fail_nums
     if eval_time >= eval_num:
         # Already complete on resume - nothing left to do.

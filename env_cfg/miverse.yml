@@ -1,0 +1,36 @@
+benchmark: MiVerse
+# Parameters follow MiVerse's miverse_replay; layouts retain its directory name.
+config_name: miverse_teleop
+
+# Retained from the source profile; upstream does not consume this field.
+# Camera resolutions remain those declared in m92uw_nav_ui.yml.
+camera_long_edge: 3840
+
+config:
+  sim: miverse
+  scene: miverse_kitchen
+  robot: m92uw
+  camera: m92uw_nav_ui
+
+observation:
+  collect_freq: 30
+  robot:
+    joint_states: true
+    base_ee_pose: true
+    head_base_pose: true
+    root_velocity: true
+  vision:
+    approximate_depth: true
+    depth: false
+    intrinsic_matrix: true
+    extrinsic_matrix: false
+    extrinsic_base_matrix: true
+    distortion: true
+
+domain_randomization:
+  random_background: false
+  random_table: false
+  random_ground: false
+
+description:
+  seen: 1

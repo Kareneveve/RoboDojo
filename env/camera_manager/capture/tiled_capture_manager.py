@@ -51,11 +51,27 @@ class TiledCaptureManager:
         Initialize the capture manager.
         This method should be called before the simulation context is created.
         """
-        if len(self.cameras) == 0:
-            self.cameras = self.camera_manager.cameras
-            self.camera_names = self.camera_manager.camera_names
+        self.cameras = self.camera_manager.cameras
+        self.camera_names = self.camera_manager.camera_names
         self.num_cams = len(self.cameras[0])
         self.sim = sim
+
+    def _clear_tiled_cameras(self):
+        """Destroy previous tiled views so hard reset does not stack products."""
+        for tiled_camera in self.tiled_cameras:
+            if tiled_camera is None:
+                continue
+            try:
+                tiled_camera._clean_up_tiled_sensor()
+            except Exception:
+                pass
+        self.tiled_cameras.clear()
+        self.tiled_render_products.clear()
+        self.annotator.clear()
+        self.annotator_type.clear()
+        self.annotator_device.clear()
+        self._output_buffers.clear()
+        self.camera_prim_paths.clear()
 
     def init_cameras(self):
         """
@@ -64,7 +80,7 @@ class TiledCaptureManager:
         2. Get all render_product control
         3. Attach Annotator
         """
-        self.camera_prim_paths.clear()
+        self._clear_tiled_cameras()
         for env_id in range(self.num_envs):
             self.camera_prim_paths.append([])
             for camera in self.cameras[env_id]:
@@ -74,8 +90,10 @@ class TiledCaptureManager:
             self.annotator.append([])
             self.annotator_type.append([])
             self.annotator_device.append([])
+            self.tiled_cameras.append(None)
 
         config = OmegaConf.to_container(self.config, resolve=True)
+        config.pop("enable_tiled", None)
         if "colorize_depth" in config:
             self.colorize_depth = config["colorize_depth"]
             config.pop("colorize_depth")
@@ -93,22 +111,26 @@ class TiledCaptureManager:
             else:
                 capture_config = annotator_config.get("common", None)  # check if there is common annotator config
 
-            if capture_config.get("enabled", False):
+            if capture_config is not None and capture_config.get("enabled", False):
                 annotators = deepcopy(capture_config)
                 annotators.pop("enabled")
                 for annotator_name, annotator_setting in annotators.items():
                     type_annotator = annotator_setting["type"]
                     self.annotator_type[cam_id].append(type_annotator)
+            if not self.annotator_type[cam_id]:
+                continue
             prim_paths_by_cam_id = [row[cam_id] for row in self.camera_prim_paths]
 
             camera_resolution = self.cameras[0][cam_id]._resolution
             height, width = camera_resolution[1], camera_resolution[0]
             tiled_camera = CameraView(
                 prim_paths_by_cam_id,
+                name=f"{camera_name}_tiled_view",
+                reset_xform_properties=False,
                 camera_resolution=[width, height],
                 output_annotators=self.annotator_type[cam_id],
             )
-            self.tiled_cameras.append(tiled_camera)
+            self.tiled_cameras[cam_id] = tiled_camera
             self.tiled_render_products.append(tiled_camera._render_product)
 
             # Pre-allocate output buffers for this camera's annotators
@@ -150,6 +172,9 @@ class TiledCaptureManager:
         for cam_id in cam_ids:
             cam_data = {}
             annotator_names = self.annotator_type[cam_id]
+            if self.tiled_cameras[cam_id] is None:
+                data.append(cam_data)
+                continue
             for annotator_name in annotator_names:
                 pre_allocated_out = None
                 if cam_id in self._output_buffers and annotator_name in self._output_buffers[cam_id]:
@@ -189,13 +214,7 @@ class TiledCaptureManager:
         This function will be called when we close the environment.
         """
 
-        self.annotator.clear()
-        self.annotator_type.clear()
-        self.annotator_device.clear()
-        self.tiled_cameras.clear()
+        self._clear_tiled_cameras()
         self.cameras.clear()
         self.camera_names.clear()
         self.sim = None
-        for rp in self.tiled_render_products:
-            rp.destroy()
-        self.camera_prim_paths.clear()

@@ -1,0 +1,54 @@
+# Eval cameras bound to the calibrated USD camera prims in M92UW.usd.
+enable_tiled: true
+colorize_depth: false
+
+annotator:
+  common:
+    enabled: True
+    rgb_capture:
+      type: rgb
+      device: cpu
+
+  third_view:
+    enabled: false
+
+random:
+  common:
+    enabled: false
+    action_noise:
+      pos:
+        min: [0.0, 0.0, 0.0]
+        max: [0.0, 0.0, 0.0]
+      ori:
+        min: [0.0, 0.0, 0.0]
+        max: [0.0, 0.0, 0.0]
+
+third_view:
+  camera:
+    prim_path: /World/envs/env_{env_idx}/robot0/base_footprint/head_outside
+    type: teleop_head
+    resolution: [1280, 720]
+
+cam_head:
+  camera:
+    prim_path: /World/envs/env_{env_idx}/robot0/head_camera_infra1_optical_frame/head_camera_infra1
+    type: teleop_head
+    resolution: [1280, 720]
+
+cam_chest_fisheye:
+  camera:
+    prim_path: /World/envs/env_{env_idx}/robot0/head_front_left_fisheye_color_optical_frame/head_front_left_fisheye
+    type: teleop_head
+    resolution: [1280, 800]
+
+cam_left_wrist:
+  camera:
+    prim_path: /World/envs/env_{env_idx}/robot0/l_wrist_camera1_color_optical_frame/l_wrist_camera1
+    type: d435
+    resolution: [1280, 720]
+
+cam_right_wrist:
+  camera:
+    prim_path: /World/envs/env_{env_idx}/robot0/r_wrist_camera1_color_optical_frame/r_wrist_camera1
+    type: d435
+    resolution: [1280, 720]

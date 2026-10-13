@@ -37,6 +37,7 @@ class SceneManager:
         task_config: DictConfig,
         use_fabric: bool = False,
         seeds_per_env: Sequence[int] | None = None,
+        benchmark: str = BENCHMARK,
     ):
         """Initialize the SceneManager for managing multiple parallel environments and their objects.
 
@@ -53,6 +54,7 @@ class SceneManager:
         self.device = torch.device(device)
         self.env_spacing = env_spacing
         self.use_fabric = use_fabric
+        self.benchmark = benchmark
         self.stage = get_current_stage()
         self.sim: IsaacRLEnv | None = None
         self.layout_manager = LayoutManager(
@@ -61,6 +63,7 @@ class SceneManager:
             seeds_per_env=seeds_per_env,
             scene_config=scene_config,
             task_config=task_config,
+            benchmark=benchmark,
         )
         self.layout_manager.scene_manager = self  # Provide reference to SceneManager for LayoutManager
         if seeds_per_env is not None:
@@ -92,6 +95,7 @@ class SceneManager:
         self.pending_initialization = []
         self.spawnable_object_types = [
             "rigid",
+            "dynamic",
             "articulation",
             "garment",
             "geometry",
@@ -125,12 +129,12 @@ class SceneManager:
                 # Create dynamic and articulation objects for CUDA
                 self.spawn_scene_objects(
                     env_id=env_idx,
-                    exclude_types=list(set(self.spawnable_object_types) - {"rigid", "articulation"}),
+                    exclude_types=list(set(self.spawnable_object_types) - {"rigid", "dynamic", "articulation"}),
                 )
             else:
                 self.spawn_scene_objects(
                     env_id=env_idx,
-                    exclude_types=list(set(self.spawnable_object_types) - {"articulation"}),
+                    exclude_types=list(set(self.spawnable_object_types) - {"dynamic", "articulation"}),
                 )
 
         self.setup_scene = True
@@ -238,13 +242,13 @@ class SceneManager:
         if self.device.type == "cuda":
             self.relocate_stale_objects(env_id, ["rigid", "articulation"])
             # Clear existing objects (based on exclude_types)
-            self.clear_scene_objects(env_id, exclude_types=["rigid", "articulation"])
-            self.spawn_scene_objects(env_id, exclude_types=["rigid", "articulation"])
+            self.clear_scene_objects(env_id, exclude_types=["rigid", "dynamic", "articulation"])
+            self.spawn_scene_objects(env_id, exclude_types=["rigid", "dynamic", "articulation"])
         else:
             self.relocate_stale_objects(env_id, ["articulation"])
             # Clear existing objects (based on exclude_types)
-            self.clear_scene_objects(env_id, exclude_types=["articulation"])
-            self.spawn_scene_objects(env_id, exclude_types=["articulation"])
+            self.clear_scene_objects(env_id, exclude_types=["dynamic", "articulation"])
+            self.spawn_scene_objects(env_id, exclude_types=["dynamic", "articulation"])
 
     def spawn_category_objects(
         self,
@@ -485,7 +489,8 @@ class SceneManager:
         env_root = self.env_roots[env_id]
         if types not in ["Table", "Room", "Light", "Ground"]:
             return
-        prim_path = f"{env_root}/{types}"
+        fixture_dir = "Rooms" if types == "Room" else types
+        prim_path = f"{env_root}/{fixture_dir}"
         if is_prim_path_valid(prim_path):
             delete_prim(prim_path)
 
@@ -578,6 +583,8 @@ class SceneManager:
         elif obj_type == "articulation":
             return ArticulationObject(
                 env_origin=self.sim.scene.env_origins[env_id],
+                # Legacy RoboDojo assets also set false but kept their authored world joints.
+                release_fixed_base=self.benchmark == "MiVerse",
                 **{k: v for k, v in base_args.items() if k != "primitive_type"},
             )
         else:
@@ -606,9 +613,21 @@ class SceneManager:
                 self.spawn_category_objects(env_id, cat_name, objects_cfg[physics_type][cat_name], exclude_types)
 
     def close(self):
+        """Release registries; BaseEnv closes the simulation and removes the stage.
+
+        Deleting individual prims here would invalidate shared physics views and
+        leave queued Action Graph callbacks referring to removed scene objects.
+        """
         self.layout_manager.close()
         for env_id in range(self.num_envs):
-            self.clear_scene_objects(env_id)
+            for collection in (
+                self._rigid_and_dynamic_objects,
+                self._articulation_objects,
+                self._garment_objects,
+                self._geometry_objects,
+                self._fluid_objects,
+            ):
+                collection[env_id].clear()
 
             self._lights[env_id].clear()
             self._rooms[env_id] = None
@@ -616,6 +635,7 @@ class SceneManager:
             self._grounds[env_id].clear()
 
         self._background = None
+        self.pending_initialization.clear()
 
     def clear_scene_objects(self, env_id: int, exclude_types: List[str] | None = None):
         """Clear all existing objects in the specified environment.
@@ -639,6 +659,8 @@ class SceneManager:
 
         for obj_dict in collections_to_clear:
             for obj_key, obj in list(obj_dict.items()):
+                if "dynamic" in exclude_types and isinstance(obj, DynamicObject):
+                    continue
                 self.delete_scene_object(obj)
                 del obj_dict[obj_key]
 

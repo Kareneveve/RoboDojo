@@ -1,5 +1,6 @@
 import random
 
+from isaacsim.core.prims import RigidPrim
 from isaacsim.core.prims.impl.single_prim_wrapper import _SinglePrimWrapper
 from isaacsim.core.prims.impl.xform_prim import XFormPrim
 from isaacsim.core.simulation_manager import SimulationManager
@@ -8,10 +9,14 @@ from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage
 import numpy as np
 from omegaconf import DictConfig
 import omni.usd
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom, UsdPhysics
 import torch
+import transforms3d as t3d
 
+from env.environment.isaac.physx_device import align_isaacsim_view_to_physx, as_numpy
 from env.scene_manager.layout_manager import LayoutManager
+from env.scene_manager.objects.action_graph_paths import remap_referenced_action_graph_prim_paths
+from env.scene_manager.objects.env_origin import shift_by_origin, store_env_origin
 
 
 class DynamicObject(_SinglePrimWrapper):
@@ -33,6 +38,7 @@ class DynamicObject(_SinglePrimWrapper):
         prim = add_reference_to_stage(usd_path=usd_path, prim_path=prim_path)
         if not prim or not prim.IsValid():
             raise RuntimeError(f"Failed to load USD from {usd_path} to {prim_path}")
+        remap_referenced_action_graph_prim_paths(instance_root_prim=prim, source_usd_path=usd_path)
 
         self.stage = get_current_stage()
         self._prim_path = prim_path
@@ -47,9 +53,7 @@ class DynamicObject(_SinglePrimWrapper):
         self.instance_config = inst_config
         self.visual_config = self.instance_config.get("visual", {})
         self.physics_config = self.instance_config.get("physics", {})
-        self.env_origin = env_origin
-        if isinstance(self.env_origin, torch.Tensor):
-            self.env_origin = self.env_origin.detach().cpu().numpy().tolist()
+        self.env_origin = store_env_origin(env_origin)
 
         self.usd_path = usd_path
         self.usd_prim_path = prim_path
@@ -57,6 +61,22 @@ class DynamicObject(_SinglePrimWrapper):
         self.default_ori = default_ori
         self.scale = scale
         self.visible = self.visual_config.get("visible", None)
+        self._rigid_body_prim_path = self._find_first_rigid_body_prim_path(prim)
+        self._rigid_body_view = None
+        self._rigid_body_default_local_positions = None
+        self._rigid_body_default_local_orientations = None
+        if self._rigid_body_prim_path is not None:
+            body_prim = self.stage.GetPrimAtPath(self._rigid_body_prim_path)
+            local_transform = UsdGeom.Xformable(body_prim).GetLocalTransformation()
+            if isinstance(local_transform, tuple):
+                local_transform = local_transform[0]
+            transform = Gf.Transform(local_transform)
+            translation = transform.GetTranslation()
+            quaternion = transform.GetRotation().GetQuat()
+            self._rigid_body_default_local_positions = np.asarray([translation], dtype=np.float32)
+            self._rigid_body_default_local_orientations = np.asarray(
+                [[quaternion.GetReal(), *quaternion.GetImaginary()]], dtype=np.float32
+            )
 
         self._backend = SimulationManager.get_backend()
         self._device = SimulationManager.get_physics_sim_device()
@@ -78,6 +98,81 @@ class DynamicObject(_SinglePrimWrapper):
     def initialize(self):
         self.physics_sim_view = SimulationManager.get_physics_sim_view()
         super().initialize(physics_sim_view=self.physics_sim_view)
+        align_isaacsim_view_to_physx(self)
+
+    @staticmethod
+    def _find_first_rigid_body_prim_path(root_prim) -> str | None:
+        for prim in Usd.PrimRange(root_prim):
+            if prim != root_prim and prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                return prim.GetPath().pathString
+        return None
+
+    def _ensure_rigid_body_view(self) -> bool:
+        """Bind the driven body after PhysX has parsed the referenced USD."""
+        if self._rigid_body_view is None:
+            if self._rigid_body_prim_path is None:
+                return False
+            self._rigid_body_view = RigidPrim(
+                prim_paths_expr=self._rigid_body_prim_path,
+                name=f"{self.instance_name}_rigid_body",
+                reset_xform_properties=False,
+                prepare_contact_sensors=False,
+            )
+        # The PhysX handle can become available after the view is constructed.
+        align_isaacsim_view_to_physx(self._rigid_body_view)
+        return True
+
+    def _reset_rigid_body_states(self):
+        """Restore the authored child-body pose and clear linear/angular speed."""
+        if not self._ensure_rigid_body_view():
+            return
+        body_device = self._rigid_body_view._device
+        self._rigid_body_view.set_local_poses(
+            translations=self._backend_utils.convert(self._rigid_body_default_local_positions, body_device),
+            orientations=self._backend_utils.convert(self._rigid_body_default_local_orientations, body_device),
+        )
+        velocities = self._backend_utils.create_zeros_tensor(
+            [self._rigid_body_view.count, 6], dtype="float32", device=body_device
+        )
+        self._rigid_body_view.set_velocities(velocities)
+
+    def get_physics_root_world_pose(self) -> tuple[np.ndarray, np.ndarray]:
+        """Reconstruct the asset-root pose from its live driven-body pose.
+
+        Metadata bboxes use the referenced root frame; the root Xform itself
+        remains at the spawn pose while PhysX moves the child body.
+        """
+        if not self._ensure_rigid_body_view():
+            raise RuntimeError(f"Dynamic object {self.instance_name!r} has no descendant rigid body.")
+        if not self._rigid_body_view.is_physics_handle_valid():
+            raise RuntimeError(f"Dynamic object {self.instance_name!r} has no valid PhysX body view.")
+        positions, orientations = self._rigid_body_view.get_world_poses()
+        positions = as_numpy(positions).reshape(-1, 3)
+        orientations = as_numpy(orientations).reshape(-1, 4)
+        if positions.shape[0] != 1 or orientations.shape[0] != 1:
+            raise RuntimeError(f"Dynamic object {self.instance_name!r} must resolve exactly one driven rigid body.")
+        body_rotation_world = t3d.quaternions.quat2mat(orientations[0].astype(float, copy=False))
+        body_rotation_local = t3d.quaternions.quat2mat(
+            np.asarray(self._rigid_body_default_local_orientations[0], dtype=float)
+        )
+        root_rotation_world = body_rotation_world @ body_rotation_local.T
+        body_position_local = np.asarray(self._rigid_body_default_local_positions[0], dtype=float)
+        root_position_world = positions[0] - root_rotation_world @ (
+            body_position_local * np.asarray(self.scale, dtype=float)
+        )
+        return root_position_world, t3d.quaternions.mat2quat(root_rotation_world)
+
+    def _clear_persistent_wrenches(self):
+        """Clear Action Graph force/torque values before an unrendered reset."""
+        if self._rigid_body_prim_path is None:
+            return
+        body_prim = self.stage.GetPrimAtPath(self._rigid_body_prim_path)
+        if not body_prim or not body_prim.IsValid():
+            return
+        for name in ("physxForce:force", "physxForce:torque"):
+            attribute = body_prim.GetAttribute(name)
+            if attribute and attribute.IsValid():
+                attribute.Set((0.0, 0.0, 0.0))
 
     def _find_first_mesh_in_hierarchy(self, prim_path: str) -> str | None:
         start_prim = get_prim_at_path(prim_path)
@@ -111,18 +206,20 @@ class DynamicObject(_SinglePrimWrapper):
         points_world, points_local, pos_world, ori_world = self.sample_mesh_vertices()
         if pos_world is None or ori_world is None or points_local.size == 0:
             pos_world, ori_world = self.get_world_pose()
-            pos_world = np.array(pos_world, dtype=np.float32)
-            ori_world = np.array(ori_world, dtype=np.float32)
+            pos_world = as_numpy(pos_world, dtype=np.float32)
+            ori_world = as_numpy(ori_world, dtype=np.float32)
             bbox = np.zeros(6, dtype=np.float32)
         else:
             bbox = np.concatenate([points_local.min(axis=0), points_local.max(axis=0)])
 
-        pos = np.subtract(pos_world, self.env_origin) if is_relative else pos_world
+        pos = shift_by_origin(pos_world, self.env_origin, relative=is_relative)
         return pos, ori_world, bbox
 
     def apply_saved_pose(self):
         self.set_local_pose(translation=self.default_pos, orientation=self.default_ori)
         self.set_local_scale(np.array(self.scale))
+        self._clear_persistent_wrenches()
+        self._reset_rigid_body_states()
 
     def relocate_offscreen(self):
         _FAR_CENTER = (100000.0, 100000.0, 100000.0)
@@ -134,3 +231,5 @@ class DynamicObject(_SinglePrimWrapper):
         )
         self.set_local_pose(translation=far_pos, orientation=self.default_ori)
         self.set_local_scale(np.array(self.scale))
+        self._clear_persistent_wrenches()
+        self._reset_rigid_body_states()

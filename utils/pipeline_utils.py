@@ -1,7 +1,10 @@
 import os
+import re
 
+from omegaconf import OmegaConf
 import yaml
 
+from env.benchmark import BenchmarkPaths
 from env.global_configs import *
 from utils.load_file import *
 
@@ -40,10 +43,9 @@ def process_randomization(env_cfg):
             env_cfg["scene"]["Table"]["random"] = False
 
     if "scene" in env_cfg and "Ground" in env_cfg["scene"]:
-        if randomization_cfg.get("random_ground", False):
-            env_cfg["scene"]["Ground"]["materials"]["random"] = True
-        else:
-            env_cfg["scene"]["Ground"]["materials"]["random"] = False
+        materials = env_cfg["scene"]["Ground"].get("materials")
+        if materials is not None:
+            materials["random"] = bool(randomization_cfg.get("random_ground", False))
 
     if "scene" in env_cfg and "Background" in env_cfg["scene"]:
         if randomization_cfg.get("random_background", False):
@@ -73,11 +75,27 @@ def _enable_teleop_physx_stabilization(sim_cfg):
 
 
 def process_config(env_cfg, task_name):
-    BENCHMARK_PATH = os.path.join(ROOT_DIR, "task", BENCHMARK)
-    task_index_path = os.path.join(BENCHMARK_PATH, "config", "_task.yml")
+    benchmark_paths = BenchmarkPaths.from_config(env_cfg.get("eval_cfg", {}))
+    task_index_path = benchmark_paths.config_dir / "_task.yml"
     info = load_yaml(task_index_path)
     task_info = info["tasks"].get(task_name, {})
     common_info = info.get("common", {})
+
+    # Apply declared task overrides; keep existing simulation defaults otherwise.
+    if "device" in task_info or "device" in common_info:
+        device = str(_task_setting(task_info, common_info, "device", "cpu")).strip().lower()
+        if re.fullmatch(r"cpu|cuda(?::[0-9]+)?", device) is None:
+            raise ValueError(f"device must be cpu, cuda, or cuda:<index>, got {device!r} for task {task_name!r}.")
+        OmegaConf.update(env_cfg, "sim.device", device, force_add=True)
+
+    if "overwrite_gpu_setting" in task_info or "overwrite_gpu_setting" in common_info:
+        overwrite_gpu_setting = int(_task_setting(task_info, common_info, "overwrite_gpu_setting", 0))
+        if overwrite_gpu_setting not in (-1, 0, 1):
+            raise ValueError(
+                "overwrite_gpu_setting must be -1, 0, or 1, "
+                f"got {overwrite_gpu_setting} for task {task_name!r}."
+            )
+        OmegaConf.update(env_cfg, "sim.overwrite_gpu_setting", overwrite_gpu_setting, force_add=True)
 
     if _task_setting(task_info, common_info, "data_source", "datagen") == "teleop":
         _enable_teleop_physx_stabilization(env_cfg["sim"])

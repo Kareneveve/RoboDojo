@@ -1,0 +1,62 @@
+# One floating-root articulation shared by the two arm descriptions.
+mobile:
+  max_linear_velocity: 0.5
+  max_linear_acceleration: 1.8
+  max_angular_velocity: 22.5
+  max_angular_acceleration: 120.0
+  direct_target_angular_velocity: true
+  angular_deceleration_multiplier: 1.5
+  position_tolerance: 0.001
+  angle_tolerance: 0.1
+  heading_hold_settle_steps: 2
+  base_motion_posture_hold: true
+  yaw_torque_control:
+    effective_inertia_kg_m2: 8.65
+    max_torque_nm: 7500.0
+    stop_velocity_threshold_rad_s: 0.01
+    disturbance_observer_gain: 0.3
+    max_disturbance_nm: 1000.0
+    heading_hold_stiffness_nm_per_rad: 2500.0
+    heading_hold_damping_nm_s_per_rad: 220.0
+robots:
+  - robot_type: arm
+    robot_name: m92uw
+    coupled: true
+    planner:
+      ik_backend: pink
+      planner_backend: pink
+    fix_root_link: false
+    collision_bbox:
+      frame: root
+      lower: [-0.41, -0.41, -0.01]
+      upper: [0.41, 0.41, 1.85]
+    need_planner: true
+    default_root_pos: [0.0, -0.6, 0.0]
+    default_root_rot: [0.70710678, 0.0, 0.0, 0.70710678]
+    grasp_perfect_direction: [front_right, front_left]
+    send_arm_name: [left_arm, right_arm]
+    send_joints_name:
+      - l_index_mcp_joint
+      - l_index_pip_joint
+      - l_middle_mcp_joint
+      - l_middle_pip_joint
+      - l_pinky_mcp_joint
+      - l_pinky_pip_joint
+      - l_ring_mcp_joint
+      - l_ring_pip_joint
+      - l_thumb_cmc_y_joint
+      - l_thumb_cmc_p_joint
+      - l_thumb_mcp_joint
+      - l_thumb_ip_joint
+      - r_index_mcp_joint
+      - r_index_pip_joint
+      - r_middle_mcp_joint
+      - r_middle_pip_joint
+      - r_pinky_mcp_joint
+      - r_pinky_pip_joint
+      - r_ring_mcp_joint
+      - r_ring_pip_joint
+      - r_thumb_cmc_y_joint
+      - r_thumb_cmc_p_joint
+      - r_thumb_mcp_joint
+      - r_thumb_ip_joint

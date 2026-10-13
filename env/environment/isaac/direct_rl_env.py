@@ -17,6 +17,9 @@ class CustomDirectRLEnv(DirectRLEnv):
             ):
                 self.sim.render()
             self.scene.update(dt=self.physics_dt)
+            refresh_host_state = getattr(self, "refresh_host_state", None)
+            if callable(refresh_host_state):
+                refresh_host_state()
 
         self.episode_length_buf += 1
         self.common_step_counter += 1

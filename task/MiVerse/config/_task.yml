@@ -1,0 +1,32 @@
+common:
+  device: cuda
+  overwrite_gpu_setting: 0
+  scene_config: miverse_kitchen
+  data_source: "datagen"
+  robot_config: "m92uw"
+  camera_config: "m92uw_nav_ui"
+  render_interval: 2
+  robot_self_collision: false
+  eval_nums: 50
+
+tasks:
+  place_kettle_on_tv_stand:
+    scene_config: miverse_livingroom_notv
+
+  place_fruit_basket:
+    scene_config: miverse_livingroom_notv
+
+  throw_away_trash:
+    device: cpu
+    scene_config: miverse_livingroom1
+
+  put_object_in_sink: {}
+
+  distribute_bowls_to_plates: {}
+
+  place_objects_in_dishwasher: {}
+
+  place_bread_in_oven: {}
+
+  sweep_paper_ball_into_dustbin:
+    scene_config: miverse_livingroom1

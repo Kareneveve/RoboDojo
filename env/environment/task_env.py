@@ -1,5 +1,6 @@
 from typing import Any, List
 
+from env.benchmark import BenchmarkPaths
 from env.camera_manager.camera_manager import CameraManager
 from env.environment.base_env import BaseEnv
 from env.robot_manager.control_manager import ControlSeq
@@ -40,6 +41,7 @@ class TaskEnv(BaseEnv):
             seeds_per_env=self.env_seed_list,
             scene_config=self.scene_config,
             task_config=config.task_env,
+            benchmark=BenchmarkPaths.from_config(config.get("eval_cfg", {})).name,
         )
 
         self.robot_manager._load_camera_cfg(config.camera)

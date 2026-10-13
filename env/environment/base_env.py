@@ -10,6 +10,8 @@ from omegaconf import DictConfig, OmegaConf
 from omni.physx import acquire_physx_interface
 
 from env.environment.isaac.isaac_rl_env import IsaacRLEnv
+from env.environment.isaac.physx_device import is_cpu_device, patch_isaaclab_articulation_data
+from env.environment.stage_lifecycle import replace_current_stage
 from env.seeding import seed_everywhere
 
 DEFAULT_SIM_DEVICE = "cpu"
@@ -105,7 +107,7 @@ class BaseEnv(gym.Env):
         self._global_seed: int | None = None
         self.env_seeds: list[int] | None = None
         self._configure_seed_config(self.config.seed)
-        if self.device != DEFAULT_SIM_DEVICE and not self.use_fabric:
+        if not is_cpu_device(self.device) and not self.use_fabric:
             self.use_fabric = True
         self.sim = None
         self.stage = get_current_stage()
@@ -118,6 +120,7 @@ class BaseEnv(gym.Env):
         Args:
             config (DictConfig): The configuration for the environment. This comes from hydra yaml.
         """
+        patch_isaaclab_articulation_data()
         self.sim_cfg: DirectRLEnvCfg = parse_env_cfg("IsaacRLEnv-V0", device=self.device, use_fabric=self.use_fabric)
 
         self.sim_cfg.decimation = config.decimation
@@ -192,9 +195,12 @@ class BaseEnv(gym.Env):
         Setup the physics for the simulation.
         This function will be called after simulation context is created
         """
-        # enable cpu garment and deformable
         self.physics_interface = acquire_physx_interface()
-        self.physics_interface.overwrite_gpu_setting(1)
+        # MiVerse selects CPU PhysX explicitly; preserve RoboDojo's GPU default.
+        overwrite_gpu_setting = int(self.config.get("overwrite_gpu_setting", 1))
+        if overwrite_gpu_setting not in (-1, 0, 1):
+            raise ValueError(f"overwrite_gpu_setting must be -1, 0, or 1, got {overwrite_gpu_setting}.")
+        self.physics_interface.overwrite_gpu_setting(overwrite_gpu_setting)
 
         # expose physics context
         self.physics_context = sim.sim.get_physics_context()
@@ -217,8 +223,7 @@ class BaseEnv(gym.Env):
             import omni.usd
 
             ctx = omni.usd.get_context()
-            ctx.close_stage()
-            ctx.new_stage()
+            replace_current_stage(ctx, self.app)
         except Exception as e:
             print("[restart] close_stage failed:", e)
 

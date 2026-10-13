@@ -16,6 +16,9 @@ import omni.usd
 from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 import torch
 
+from env.environment.isaac.physx_device import align_isaacsim_view_to_physx, as_numpy
+from env.scene_manager.objects.env_origin import store_env_origin
+
 
 class ArticulationObject(SingleArticulation):
     """
@@ -32,6 +35,8 @@ class ArticulationObject(SingleArticulation):
         default_pos: tuple,
         default_ori: tuple,
         scale: tuple,
+        *,
+        release_fixed_base: bool = False,
     ):
         """
         Initialize the ArticulationObject with position, orientation, and configuration.
@@ -56,7 +61,7 @@ class ArticulationObject(SingleArticulation):
         self.instance_config = inst_config
         self.visual_cfg = self.instance_config.get("visual", {})
         self.physics_cfg = self.instance_config.get("physics", {})
-        self.env_origin = env_origin
+        self.env_origin = store_env_origin(env_origin)
         self.physics_cfg = self._apply_physics_ratio_randomization(self.physics_cfg)
         self.usd_prim_path = prim_path
         self.usd_path = usd_path
@@ -69,8 +74,11 @@ class ArticulationObject(SingleArticulation):
         self._default_linear_velocity = [0.0, 0.0, 0.0]
         self._default_angular_velocity = [0.0, 0.0, 0.0]
         self.init_scale = scale
-        if self.physics_cfg.get("fixed_base", False):
+        fixed_base = self.physics_cfg.get("fixed_base", None)
+        if fixed_base:
             self.fix_root_link()
+        elif fixed_base is False and release_fixed_base:
+            self.release_root_link()
         super().__init__(
             prim_path=self._prim_path,
             name=self.prim_name,
@@ -97,6 +105,17 @@ class ArticulationObject(SingleArticulation):
             self.set_linear_velocity(torch.tensor(self._default_linear_velocity))
         if self._default_angular_velocity is not None:
             self.set_angular_velocity(torch.tensor(self._default_angular_velocity))
+
+    def release_root_link(self):
+        """Disable an existing joint that fixes this articulation to the world."""
+        stage = get_current_stage()
+        articulation_prim = stage.GetPrimAtPath(self._prim_path)
+        if not UsdPhysics.ArticulationRootAPI(articulation_prim):
+            return
+        existing_fixed_joint_prim = find_global_fixed_joint_prim(self._prim_path)
+        if existing_fixed_joint_prim is None:
+            return
+        existing_fixed_joint_prim.GetJointEnabledAttr().Set(False)
 
     def fix_root_link(self):
         stage = get_current_stage()
@@ -232,8 +251,11 @@ class ArticulationObject(SingleArticulation):
     def initialize(self):
         self.physics_sim_view = SimulationManager.get_physics_sim_view()
         super().initialize(physics_sim_view=self.physics_sim_view)
-        self.upper_joint_positions = self.dof_properties["upper"].copy()
-        self.lower_joint_positions = self.dof_properties["lower"].copy()
+        align_isaacsim_view_to_physx(self)
+        # dof_properties assigns device tensors into NumPy and fails on CUDA.
+        limits = as_numpy(self._articulation_view.get_dof_limits()[0])
+        self.lower_joint_positions = np.array(limits[:, 0], copy=True)
+        self.upper_joint_positions = np.array(limits[:, 1], copy=True)
         self.initial_joint_positions = self.get_current_joint_positions()
         self.initial_drive_targets = self._capture_drive_targets()
         self.app = omni.kit.app.get_app()
@@ -440,15 +462,15 @@ class ArticulationObject(SingleArticulation):
 
     def get_all_joints_info(self):
         joint_info = {}
-        joint_positions = self.get_joint_positions()
+        joint_positions = as_numpy(self.get_joint_positions()).reshape(-1)
         for idx, joint_name in enumerate(self.dof_names):
             pos = joint_positions[idx]
             lower = self.lower_joint_positions[idx]
             upper = self.upper_joint_positions[idx]
             joint_info[joint_name] = {
                 "index": idx,
-                "position": pos.item() if hasattr(pos, "item") else pos,
-                "lower": lower.item() if hasattr(lower, "item") else lower,
-                "upper": upper.item() if hasattr(upper, "item") else upper,
+                "position": float(pos),
+                "lower": float(lower),
+                "upper": float(upper),
             }
         return joint_info

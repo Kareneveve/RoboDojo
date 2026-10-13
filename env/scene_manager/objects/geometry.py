@@ -12,8 +12,11 @@ import numpy as np
 from omegaconf import DictConfig
 import omni.kit.commands
 import omni.usd
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Sdf, UsdGeom, UsdPhysics, UsdShade
 import torch
+
+from env.environment.isaac.physx_device import as_numpy
+from env.scene_manager.objects.env_origin import apply_origin_to_pose_tensor, store_env_origin
 
 
 class GeometryObject(SingleGeometryPrim):
@@ -55,7 +58,7 @@ class GeometryObject(SingleGeometryPrim):
             )
             raise RuntimeError(error_message)
         self.stage = get_current_stage()
-        self.env_origin = env_origin
+        self.env_origin = store_env_origin(env_origin)
         prim_path_parts = prim_path.split("/")
         self._prim_path = prim_path
         self.category_name = prim_path_parts[-2]
@@ -256,8 +259,8 @@ class GeometryObject(SingleGeometryPrim):
             try:
                 translation = self.get_translation()
                 orientation = self.get_orientation()
-                translation = np.array(translation, dtype=np.float32)
-                orientation = np.array(orientation, dtype=np.float32)
+                translation = as_numpy(translation, dtype=np.float32)
+                orientation = as_numpy(orientation, dtype=np.float32)
             except (AttributeError, RuntimeError):
                 print(f"Warning: Failed to get pose for {self._prim_path}: {e}")
                 translation = np.zeros(3, dtype=np.float32)
@@ -271,19 +274,7 @@ class GeometryObject(SingleGeometryPrim):
         if orientation.dim() > 1:
             orientation = orientation.squeeze()
         root_pose = torch.cat([translation, orientation])
-        if is_relative and hasattr(self, "env_origin"):
-            env_origin_tensor = (
-                torch.tensor(self.env_origin, dtype=torch.float32, device=root_pose.device)
-                if isinstance(self.env_origin, np.ndarray)
-                else self.env_origin
-            )
-            if env_origin_tensor.dim() == 0:
-                env_origin_tensor = env_origin_tensor.unsqueeze(0)
-            if env_origin_tensor.shape[0] < 3:
-                env_origin_tensor = torch.cat(
-                    [env_origin_tensor, torch.zeros(3 - env_origin_tensor.shape[0], device=env_origin_tensor.device)]
-                )
-            root_pose[:3] -= env_origin_tensor[:3]
+        root_pose = apply_origin_to_pose_tensor(root_pose, self.env_origin, relative=is_relative)
         return {"root_pose": root_pose}
 
     def initialize(self):

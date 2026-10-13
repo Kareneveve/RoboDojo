@@ -1,0 +1,19 @@
+Background:
+  intensity: 1000
+  default: brown_photostudio_02_4k.hdr
+  random: false
+
+# This room omits the static TV; tasks spawn a labeled articulation instead.
+Room:
+  default: MiVerse/LivingRoom/LivingRoom009_notv
+  default_pos: [0.0, 0.0, 0.0]
+  default_ori: [1.0, 0.0, 0.0, 0.0]
+  scale: [1.0, 1.0, 1.0]
+  collision: true
+
+Ground:
+  spawn: false
+  geometry: plane
+  size: [8.0, 8.0]
+  axis: Z
+  default_pos: [0.0, 0.0, 0.0]

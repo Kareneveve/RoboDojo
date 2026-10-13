@@ -1,0 +1,19 @@
+Background:
+  intensity: 1000
+  default: brown_photostudio_02_4k.hdr
+  random: false
+
+Room:
+  default: MiVerse/Kitchen/Kitchen009
+  default_pos: [0.0, 0.0, 0.0]
+  default_ori: [1.0, 0.0, 0.0, 0.0]
+  scale: [1.0, 1.0, 1.0]
+  collision: true
+
+# The room supplies the floor; Ground is only a layout support plane.
+Ground:
+  spawn: false
+  geometry: plane
+  size: [12.0, 12.0]
+  axis: Z
+  default_pos: [0.0, 0.0, -0.02]

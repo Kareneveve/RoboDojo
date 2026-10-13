@@ -115,6 +115,13 @@ fi
 render_interval="$(python3 -c "import sys,yaml;print(yaml.safe_load(open(sys.argv[1])).get('render_interval',1))" "$sim_cfg_file")"
 num_envs="$(python3 -c "import sys,yaml;print(yaml.safe_load(open(sys.argv[1])).get('scene',{}).get('num_envs',1))" "$sim_cfg_file")"
 
+# Override a single run without editing the shared simulation profile.
+num_envs="${EVAL_NUM_ENVS:-${num_envs}}"
+if [[ ! "${num_envs}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] num_envs must be a positive integer, got '${num_envs}'" >&2
+  exit 1
+fi
+
 echo "[INFO] render_interval = ${render_interval}"
 echo "[INFO] num_envs        = ${num_envs}"
 

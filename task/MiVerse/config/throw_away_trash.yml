@@ -1,0 +1,182 @@
+Navigation:
+  MiVerse/LivingRoom/LivingRoom010:
+    robot_pose:
+      position:
+      - 1.35
+      - -1.65
+      - 0.0
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+Rigid:
+- common:
+    margin: 0.02
+    need_check_stable: true
+    rotate_deg: 30
+    rotate_rand: true
+    place_tag: up
+    plane_mode: unique
+    CoffeeTable068:
+      xlim:
+      - -0.098596
+      - 0.098596
+      ylim:
+      - -0.105261
+      - 0.105261
+      rotate_rand: true
+      virtual_support:
+        frame:
+        - -0.4363248845
+        - -0.0858775692
+        - 0.5957311182
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - -0.209090656
+        - 0.209090656
+        ylim:
+        - -0.209090656
+        - 0.209090656
+  category:
+  - name: milk_box
+    index:
+    - 1
+  - name: bottle
+    index:
+    - 0
+    - 3
+    - 41
+  select_mode:
+    nums: 1
+    mode: unique
+    label:
+    - discarded_package
+Geometry:
+- common:
+    margin: 0.03
+    need_check_stable: false
+    rotate_rand: false
+    plane_mode: unique
+    OutsideDoorLeft:
+      xlim:
+      - 2.8
+      - 3.58
+      ylim:
+      - -0.5
+      - -0.09999999999999999
+      rotate_rand: false
+      virtual_support:
+        frame:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - 2.54485
+        - 3.83515
+        ylim:
+        - -0.75515
+        - 0.15515
+    OutsideDoorRight:
+      xlim:
+      - 2.8
+      - 3.58
+      ylim:
+      - -2.97
+      - -2.58
+      rotate_rand: false
+      virtual_support:
+        frame:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - 2.54485
+        - 3.83515
+        ylim:
+        - -3.22515
+        - -2.32485
+  category:
+  - name: dustbin
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - dustbin
+Dynamic:
+- common:
+    margin: 0.02
+    need_check_stable: false
+    rotate_rand: false
+    zlim:
+    - 0.05
+    - 0.05
+    plane_mode: unique
+    LivingRoomFloor:
+      xlim:
+      - 0.0
+      - 0.0
+      ylim:
+      - 1.85
+      - 1.85
+      rotate_rand: false
+      virtual_support:
+        frame:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - -2.0
+        - 2.0
+        ylim:
+        - -2.1
+        - 2.1
+      prohibited_areas:
+      - name: coffee_table
+        shape: box
+        xlim:
+        - -0.9
+        - 0.03
+        ylim:
+        - -0.55
+        - 0.38
+      - name: tv_stand
+        shape: box
+        xlim:
+        - -2.1
+        - -1.55
+        ylim:
+        - -1.0
+        - 0.96
+      - center:
+        - 1.45
+        - -1.65
+        name: robot_start_clearance
+        radius: 0.52
+        shape: circle
+  category:
+  - name: robot_vacuum_2
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - robot_vacuum_obstacle

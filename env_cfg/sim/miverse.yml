@@ -1,0 +1,19 @@
+# Eval settings from MiVerse's miverse_replay simulation config.
+device: cuda
+
+decimation: 1
+dt: 0.016666666666666666
+render_interval: 2
+
+scene:
+  num_envs: 1
+  env_spacing: 12
+
+# Other PhysX/render settings use the shared BaseEnv defaults.
+# Compute device and PhysX GPU override come from task/MiVerse/config/_task.yml.
+render:
+  antialiasing_mode: MSAA
+  samples_per_pixel: 4
+
+frequency_settings:
+  /app/runLoops/main/rateLimitFrequency: 60
