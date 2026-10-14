@@ -56,6 +56,7 @@ class RobotManager:
             )
             for index, cfg in enumerate(self.robots_cfg)
         ]
+        self._pink_overrides = dict(config.get("pink", {}) or {})
         self.device = device
         self.dt = dt
         self.mobile_config = config.get("mobile", {}) or {}
@@ -1049,6 +1050,7 @@ class RobotManager:
             )
         )
         pink_cfg = dict(cfg.get("pink", {}) or {})
+        pink_cfg.update(self._pink_overrides)
         implementation = PinkPlanner(
             robot_origin_pose=[0, 0, 0, 1, 0, 0, 0],
             active_joints_name=joints,
@@ -1067,6 +1069,7 @@ class RobotManager:
             previous_command_task_cost=pink_cfg.get("previous_command_task_cost", 0.0),
             previous_command_reset_threshold=pink_cfg.get("previous_command_reset_threshold", 0.25),
             null_space_weight_overrides=pink_cfg.get("null_space_weight_overrides"),
+            null_space_current_joints=pink_cfg.get("null_space_current_joints"),
             damping_task_cost=pink_cfg.get("damping_task_cost", 1e-4),
             max_joint_delta_per_step=cfg.get("pink_max_joint_delta_per_step", 0.8),
             self_collision_check=pink_cfg.get("self_collision_check", False),

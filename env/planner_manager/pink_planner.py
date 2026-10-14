@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -73,6 +73,7 @@ class PinkPlanner:
         tool_frames=None,
         locked_joint_positions: Mapping[str, float] | None = None,
         null_space_weight_overrides: Mapping[str, float] | None = None,
+        null_space_current_joints: Sequence[str] | None = None,
         solver: str | None = None,
         position_cost: float = 2.0,
         orientation_cost: float = 2.0,
@@ -164,10 +165,23 @@ class PinkPlanner:
         # directly; sqrt preserves its per-joint objective ratios.
         self._posture_task.cost = self.posture_task_cost * np.sqrt(self.cspace_distance_weight)
         self._null_space_task = None
+        self._null_space_current_indices = np.asarray([], dtype=np.int64)
+        self._null_space_targets: dict[int, np.ndarray] = {}
         if self.default_joint_position is not None:
             self._null_space_task = PostureTask(cost=self.null_space_task_cost)
             self._null_space_task.cost = self.null_space_task_cost * np.sqrt(self.null_space_weight)
             self._null_space_task.set_target(self.default_joint_position)
+        current_joint_names = [str(name) for name in (null_space_current_joints or [])]
+        if current_joint_names:
+            if self._null_space_task is None:
+                raise ValueError("null_space_current_joints requires a default joint position.")
+            unknown = [name for name in current_joint_names if name not in self.controlled_joint_names_pinocchio]
+            if unknown:
+                raise ValueError(f"Pink null-space current joints are not controlled: {unknown}.")
+            self._null_space_current_indices = np.asarray(
+                [self.controlled_joint_names_pinocchio.index(name) for name in current_joint_names],
+                dtype=np.int64,
+            )
         self._previous_command_task = None
         self._previous_commands: dict[int, np.ndarray] = {}
         if self.previous_command_task_cost > 0.0:
@@ -391,6 +405,10 @@ class PinkPlanner:
             self.pink_configuration.update(current_pin)
             self._posture_task.set_target(current_pin)
             env_idx = int(env_idx)
+            if self._null_space_task is not None:
+                if env_idx not in self._null_space_targets:
+                    self._set_null_space_anchor(current_pin, env_idx)
+                self._null_space_task.set_target(self._null_space_targets.get(env_idx, self.default_joint_position))
             if self._previous_command_task is not None:
                 previous_command = self._previous_commands.get(env_idx)
                 if (
@@ -495,20 +513,38 @@ class PinkPlanner:
             }
 
     def reset(self, current_joint_pos=None, *, env_idx=None):
-        """Clear all command histories, or reset one environment's reference."""
+        """Clear episode references, or anchor them to measured joint positions.
+
+        With no arguments all environments are cleared. An environment-only
+        reset defers posture anchoring until its next solve. Supplied positions
+        anchor that environment immediately (environment 0 when omitted).
+        """
 
         if current_joint_pos is None:
             if env_idx is None:
                 self._previous_commands.clear()
+                self._null_space_targets.clear()
             else:
                 self._previous_commands.pop(int(env_idx), None)
-        else:
-            current_pin = np.clip(
-                self._active_to_pin(current_joint_pos),
-                self.lower_limits,
-                self.upper_limits,
-            )
-            self._previous_commands[0 if env_idx is None else int(env_idx)] = current_pin.copy()
+                self._null_space_targets.pop(int(env_idx), None)
+            return
+        env_idx = 0 if env_idx is None else int(env_idx)
+        current_pin = np.clip(
+            self._active_to_pin(current_joint_pos),
+            self.lower_limits,
+            self.upper_limits,
+        )
+        if self._previous_command_task is not None:
+            self._previous_commands[env_idx] = current_pin.copy()
+        self._set_null_space_anchor(current_pin, env_idx)
+
+    def _set_null_space_anchor(self, current_pin, env_idx: int):
+        if not self._null_space_current_indices.size:
+            return
+        target = self.default_joint_position.copy()
+        indices = self._null_space_current_indices
+        target[indices] = current_pin[indices]
+        self._null_space_targets[env_idx] = target
 
     def close(self):
         self.reset()

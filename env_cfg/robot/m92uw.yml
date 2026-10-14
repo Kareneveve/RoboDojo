@@ -1,4 +1,27 @@
 # One floating-root articulation shared by the two arm descriptions.
+pink:
+  # Prefer the measured episode-start posture, not curobo.yml's different home.
+  # RobotManager overlays this field without replacing the asset's IK weights.
+  # An empty list restores the fixed home reference.
+  null_space_current_joints:
+    - ankle_p_joint
+    - knee_p_joint
+    - waist1_p_joint
+    - waist2_y_joint
+    - l_arm1_shoulder_p_joint
+    - l_arm2_shoulder_r_joint
+    - l_arm3_shoulder_y_joint
+    - l_arm4_elbow_p_joint
+    - l_arm5_wrist_y_joint
+    - l_arm6_wrist_p_joint
+    - l_arm7_wrist_r_joint
+    - r_arm1_shoulder_p_joint
+    - r_arm2_shoulder_r_joint
+    - r_arm3_shoulder_y_joint
+    - r_arm4_elbow_p_joint
+    - r_arm5_wrist_y_joint
+    - r_arm6_wrist_p_joint
+    - r_arm7_wrist_r_joint
 mobile:
   max_linear_velocity: 0.5
   max_linear_acceleration: 1.8
