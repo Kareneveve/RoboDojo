@@ -7,6 +7,9 @@ import sys
 
 from isaaclab.app import AppLauncher
 
+# Load Pinocchio's Assimp before Kit can expose its incompatible copy.
+import pinocchio  # noqa: F401
+
 MAX_INPROC_RESTARTS = 3
 
 
