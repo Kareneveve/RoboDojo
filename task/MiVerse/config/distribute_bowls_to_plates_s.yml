@@ -1,0 +1,322 @@
+Navigation:
+  common:
+    include_volume_scale:
+    - 8.0
+    - 5.0
+    - 3.5
+    include_volume_position:
+    - 0.0
+    - 0.0
+    - 1.5
+    agent_radius: 0.3
+    agent_height: 2.0
+  MiVerse/Kitchen/Kitchen009:
+    robot_pose:
+      position:
+      - 3.1
+      - -1.55
+      - 0.0
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+# One room-axis translation per environment. Only Ground-rooted furniture is
+# listed; all table-supported plates/bowls inherit the translated table frame.
+# Offsets are measured from the ORIGINAL layout, never the last sampled pose.
+# +X / -Y: right / down in the reference view; no left/up translation.
+LayoutTranslations:
+- labels: [table, chair_north, chair_east, chair_west]
+  xlim: [0.05, 0.30]    # 5--30 cm toward +X
+  ylim: [-0.35, -0.05]  # 5--35 cm toward -Y
+
+Rigid:
+- common:
+    check_mode: enforce
+    margin: 0
+    need_check_stable: false
+    qpos:
+    - 1
+    - 0
+    - 0
+    - 0
+    rotate_rand: false
+    zlim:
+    - 0.3855
+    - 0.3855
+    relative_plane: Ground
+    xlim:
+    - 1.252896262
+    - 1.252896262
+    ylim:
+    - 1.682301569
+    - 1.682301569
+  category:
+  - name: chair
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - chair_north
+- common:
+    check_mode: enforce
+    margin: 0
+    need_check_stable: false
+    qpos:
+    - -0.707106769
+    - 0
+    - 0
+    - 0.707106793
+    rotate_rand: false
+    zlim:
+    - 0.3855
+    - 0.3855
+    relative_plane: Ground
+    xlim:
+    - 2.004523228
+    - 2.004523228
+    ylim:
+    - 0.72907642
+    - 0.72907642
+  category:
+  - name: chair
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - chair_east
+- common:
+    check_mode: enforce
+    margin: 0
+    need_check_stable: false
+    qpos:
+    - 0.707106769
+    - 0
+    - 0
+    - 0.707106793
+    rotate_rand: false
+    zlim:
+    - 0.3855
+    - 0.3855
+    relative_plane: Ground
+    xlim:
+    - 0.594623187
+    - 0.594623187
+    ylim:
+    - 0.72907642
+    - 0.72907642
+  category:
+  - name: chair
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - chair_west
+- common:
+    check_mode: enforce
+    margin: 0
+    need_check_stable: true
+    qpos:
+    - 1
+    - 0
+    - 0
+    - 0
+    rotate_rand: false
+    # Top plate moves only left of its original table-relative X.
+    # Retain front/back variation; shared table translation is applied separately.
+    relative_plane: table
+    xlim:
+    - -0.22
+    - -0.017371189
+    ylim:
+    - 0.44
+    - 0.505
+  category:
+  - name: plate
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - plate_north
+- common:
+    check_mode: enforce
+    margin: 0
+    need_check_stable: true
+    qpos:
+    - 1
+    - 0
+    - 0
+    - 0
+    rotate_rand: false
+    relative_plane: table
+    # Right place setting: retain the original upper edge and extend downward.
+    xlim:
+    - 0.14
+    - 0.23
+    ylim:
+    - -0.28
+    - -0.000809905
+  category:
+  - name: plate
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - plate_east
+- common:
+    check_mode: enforce
+    margin: 0
+    need_check_stable: true
+    qpos:
+    - 1
+    - 0
+    - 0
+    - 0
+    rotate_rand: false
+    relative_plane: table
+    # Left place setting, kept separate from the right plate and the bowl strip.
+    xlim:
+    - -0.23
+    - -0.14
+    ylim:
+    - -0.28
+    - -0.007229672
+  category:
+  - name: plate
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - plate_west
+- common:
+    check_mode: bbox
+    margin: 0
+    need_check_stable: true
+    rotate_rand: false
+    zlim:
+    - 0.0298
+    - 0.0298
+    relative_plane: table
+    # Entire stack slides horizontally near the south edge. Original upper Y
+    # stays fixed; lower Y extends 2.15 cm toward the edge. Local coordinates
+    # make the stack follow the table translation without a second offset.
+    xlim:
+    - -0.26
+    - 0.26
+    ylim:
+    - -0.54
+    - -0.488499869
+  category:
+  - name: bowl
+    index:
+    - 0
+    # - 3
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - bowl_0
+- common:
+    check_mode: enforce
+    margin: 0
+    need_check_stable: true
+    qpos:
+    - 1
+    - 0
+    - 0
+    - 0
+    rotate_rand: false
+    zlim:
+    - 0
+    - 0
+    relative_plane: bowl_0
+    xlim:
+    - 0
+    - 0
+    ylim:
+    - 0
+    - 0
+  category:
+  - name: bowl
+    index:
+    - 0
+    - 3
+  select_mode:
+    nums: 1
+    mode: same_as_label
+    same_label: bowl_0
+    label:
+    - bowl_1
+- common:
+    check_mode: enforce
+    margin: 0
+    need_check_stable: true
+    qpos:
+    - 1
+    - 0
+    - 0
+    - 0
+    rotate_rand: false
+    zlim:
+    - 0
+    - 0
+    relative_plane: bowl_1
+    xlim:
+    - 0
+    - 0
+    ylim:
+    - 0
+    - 0
+  category:
+  - name: bowl
+    index:
+    - 0
+    - 3
+  select_mode:
+    nums: 1
+    mode: same_as_label
+    same_label: bowl_0
+    label:
+    - bowl_2
+Geometry:
+- common:
+    check_mode: enforce
+    margin: 0
+    need_check_stable: false
+    qpos:
+    - 0.707106769
+    - 0
+    - 0
+    - 0.707106793
+    rotate_rand: false
+    zlim:
+    - 0.3174
+    - 0.3174
+    relative_plane: Ground
+    xlim:
+    - 1.299573199
+    - 1.299573199
+    ylim:
+    - 0.706951557
+    - 0.706951557
+  category:
+  - name: table
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - table

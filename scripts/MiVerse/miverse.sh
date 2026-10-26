@@ -10,7 +10,7 @@ usage() {
 Usage: bash scripts/MiVerse/miverse.sh <command> [options]
 
 Commands:
-  tasks       List the eight MiVerse tasks
+  tasks       List MiVerse tasks
   doctor      Check MiVerse assets/configs/environment
   eval        Evaluate one task with a fresh policy server
   server      Start a policy server; omit --task for batch server mode

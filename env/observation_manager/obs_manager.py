@@ -81,9 +81,11 @@ class ObsManager:
         self.desc_manager.initialize(self.env)
         self.instruction = self.desc_manager.get_one_description()
 
-    def reset(self):
-        self.desc_manager.reset()
-        self.instruction = self.desc_manager.get_one_description()
+    def reset(self, *, refresh_instructions=True):
+        """Refresh episode text unless called while closing the environment."""
+        if refresh_instructions:
+            self.desc_manager.reset()
+            self.instruction = self.desc_manager.get_one_description()
 
     def _collect_shared_joint_groups(self, obs, env_idx_list, robot):
         for name, indices, getter in (

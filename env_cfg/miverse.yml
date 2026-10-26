@@ -1,10 +1,5 @@
 benchmark: MiVerse
-# Parameters follow MiVerse's miverse_replay; layouts retain its directory name.
-config_name: miverse_teleop
-
-# Retained from the source profile; upstream does not consume this field.
-# Camera resolutions remain those declared in m92uw_nav_ui.yml.
-camera_long_edge: 3840
+config_name: miverse
 
 config:
   sim: miverse

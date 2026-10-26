@@ -1,0 +1,154 @@
+Navigation:
+  common:
+    include_volume_scale:
+    - 5.0
+    - 5.0
+    - 3.5
+    include_volume_position:
+    - 0.0
+    - 0.0
+    - 1.5
+    agent_radius: 0.3
+    agent_height: 2.0
+  MiVerse/LivingRoom/LivingRoom010:
+    robot_pose:
+      position:
+      - 1.35
+      - -1.65
+      - 0.0
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+Rigid:
+- common:
+    margin: 0.015
+    need_check_stable: true
+    place_tag: up
+    rotate_deg: 180
+    rotate_rand: true
+    plane_mode: unique
+    CoffeeTable068:
+      xlim:
+      - -0.21815000000000004
+      - 0.21815000000000004
+      ylim:
+      - -0.21865000000000004
+      - 0.21865000000000004
+      rotate_rand: true
+      virtual_support:
+        frame:
+        - -0.4363248845
+        - -0.0858775692
+        - 0.5957311182
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - -0.275
+        - 0.275
+        ylim:
+        - -0.275
+        - 0.275
+      prohibited_areas:
+      - center:
+        - 0.275
+        - 0.275
+        name: round_top_corner_pp
+        radius: 0.105
+        shape: circle
+      - center:
+        - 0.275
+        - -0.275
+        name: round_top_corner_pn
+        radius: 0.105
+        shape: circle
+      - center:
+        - -0.275
+        - 0.275
+        name: round_top_corner_np
+        radius: 0.105
+        shape: circle
+      - center:
+        - -0.275
+        - -0.275
+        name: round_top_corner_nn
+        radius: 0.105
+        shape: circle
+  category:
+  - name: paper_ball
+    index:
+    - 0
+    - 1
+    - 2
+  select_mode:
+    nums: 4
+    mode: allow_duplicate
+    label:
+    - paper_ball_1
+    - paper_ball_2
+    - paper_ball_3
+    - paper_ball_4
+- common:
+    margin: 0.03
+    need_check_stable: true
+    place_tag: up
+    rotate_rand: false
+    plane_mode: unique
+    LivingRoomFloor:
+      xlim:
+      - -1.86245
+      - -1.55755
+      ylim:
+      - -1.3624
+      - -1.0776
+      rotate_rand: false
+      virtual_support:
+        frame:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - -2.0
+        - 2.0
+        ylim:
+        - -2.1
+        - 2.1
+      prohibited_areas:
+      - name: coffee_table
+        shape: box
+        xlim:
+        - -0.9
+        - 0.03
+        ylim:
+        - -0.55
+        - 0.38
+      - name: tv_stand
+        shape: box
+        xlim:
+        - -2.1
+        - -1.55
+        ylim:
+        - -0.92
+        - 0.88
+      - center:
+        - 1.45
+        - -1.65
+        name: robot_start_clearance
+        radius: 0.52
+        shape: circle
+  category:
+  - name: dustbin
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - dustbin

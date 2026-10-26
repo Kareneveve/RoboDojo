@@ -1,0 +1,169 @@
+Navigation:
+  common:
+    include_volume_scale:
+    - 5.0
+    - 5.0
+    - 3.5
+    include_volume_position:
+    - 0.0
+    - 0.0
+    - 1.5
+    agent_radius: 0.3
+    agent_height: 2.0
+  MiVerse/LivingRoom/LivingRoom010:
+    robot_pose:
+      position:
+      - 1.35
+      - -1.65
+      - 0.0
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+# Match the kettle task's XY movement, using LivingRoom010's taller table bounds.
+RoomTranslations:
+  coffee_table:
+    prim_path: CoffeeTable068
+    xlim: [-0.20, 0.20]
+    ylim: [-0.20, 0.50]
+    min_distance: 0.10
+    support_planes: [CoffeeTable068]
+    bounds:
+    - [-0.7954155405, -0.4449682252, -0.0000193390]
+    - [-0.0772342285, 0.2732130868, 0.5838466248]
+Rigid:
+- common:
+    margin: 0.015
+    need_check_stable: true
+    place_tag: up
+    rotate_deg: 180
+    rotate_rand: true
+    plane_mode: unique
+    CoffeeTable068:
+      # Keep all four balls nearer the tabletop center, clear of rounded corners.
+      # The support frame and all four balls follow the sampled table translation.
+      xlim:
+      - -0.17
+      - 0.17
+      ylim:
+      - -0.15
+      - 0.15
+      rotate_rand: true
+      virtual_support:
+        frame:
+        - -0.4363248845
+        - -0.0858775692
+        - 0.5957311182
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - -0.275
+        - 0.275
+        ylim:
+        - -0.275
+        - 0.275
+      prohibited_areas:
+      - center:
+        - 0.275
+        - 0.275
+        name: round_top_corner_pp
+        radius: 0.105
+        shape: circle
+      - center:
+        - 0.275
+        - -0.275
+        name: round_top_corner_pn
+        radius: 0.105
+        shape: circle
+      - center:
+        - -0.275
+        - 0.275
+        name: round_top_corner_np
+        radius: 0.105
+        shape: circle
+      - center:
+        - -0.275
+        - -0.275
+        name: round_top_corner_nn
+        radius: 0.105
+        shape: circle
+  category:
+  - name: paper_ball
+    index:
+    - 0
+    - 1
+    - 2
+  select_mode:
+    nums: 4
+    mode: allow_duplicate
+    label:
+    - paper_ball_1
+    - paper_ball_2
+    - paper_ball_3
+    - paper_ball_4
+- common:
+    margin: 0.03
+    need_check_stable: true
+    place_tag: up
+    rotate_rand: false
+    plane_mode: unique
+    LivingRoomFloor:
+      # Vary the carry start within the same clear area left of the TV stand.
+      xlim:
+      - -1.8
+      - -1.48
+      ylim:
+      - -1.55
+      - -1.12
+      rotate_rand: false
+      virtual_support:
+        frame:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - -2.0
+        - 2.0
+        ylim:
+        - -2.1
+        - 2.1
+      prohibited_areas:
+      # Keep the bin's pickup area clear of the table's full translation envelope.
+      - name: coffee_table
+        shape: box
+        xlim:
+        - -1.10
+        - 0.23
+        ylim:
+        - -0.75
+        - 0.88
+      - name: tv_stand
+        shape: box
+        xlim:
+        - -2.1
+        - -1.55
+        ylim:
+        - -0.92
+        - 0.88
+      - center:
+        - 1.45
+        - -1.65
+        name: robot_start_clearance
+        radius: 0.52
+        shape: circle
+  category:
+  - name: dustbin
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - dustbin

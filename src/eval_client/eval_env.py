@@ -198,7 +198,7 @@ def build_eval_env_class(task_class):
 
         def close(self):
             self._abort_video_writers()
-            self.obs_manager.reset()
+            self.obs_manager.reset(refresh_instructions=False)
             super().close()
 
         def _post_setup_scene(self, sim):

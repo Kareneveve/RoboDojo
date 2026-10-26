@@ -10,7 +10,7 @@ import torch
 
 from env.environment.isaac.isaac_rl_env import IsaacRLEnv
 from env.global_configs import *
-from env.scene_manager.layout_manager import LayoutManager
+from env.scene_manager.layout_manager import OBJECT_CONFIG_TYPES, LayoutManager
 from env.scene_manager.objects.articulation import ArticulationObject
 from env.scene_manager.objects.background import Background
 from env.scene_manager.objects.dynamic import DynamicObject
@@ -605,7 +605,8 @@ class SceneManager:
         exclude_types = exclude_types or []
         # Create new objects for this environment
         for physics_type in objects_cfg:
-            if physics_type in ["Light", "Room", "Ground", "Background", "Table"]:
+            # Saved layouts also carry instruction and placement metadata.
+            if physics_type not in OBJECT_CONFIG_TYPES:
                 continue
             for cat_name in objects_cfg[physics_type]:
                 if self.is_global_config_key(cat_name):

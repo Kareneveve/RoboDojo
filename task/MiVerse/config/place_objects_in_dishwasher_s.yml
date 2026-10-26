@@ -1,0 +1,113 @@
+Navigation:
+  common:
+    include_volume_scale:
+    - 8.0
+    - 5.0
+    - 3.5
+    include_volume_position:
+    - 0.0
+    - 0.0
+    - 1.5
+    agent_radius: 0.3
+    agent_height: 2.0
+  MiVerse/Kitchen/Kitchen009:
+    robot_pose:
+      position:
+      - 0.5
+      - -0.8
+      - 0.0
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+Geometry:
+- common:
+    zlim:
+    - 0.350361473
+    - 0.350361473
+    qpos:
+    - 0.707106781
+    - 0.0
+    - 0.0
+    - 0.707106781
+    rotate_rand: false
+    relative_plane: Ground
+    xlim:
+    - -1.040710649
+    - -1.040710649
+    ylim:
+    - -1.160618559
+    - -1.160618559
+  category:
+  - name: kitchen_island
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - kitchen_island
+Rigid:
+- common:
+    relative_plane: kitchen_island
+    # Reference view: +X is down, +Y is right. Use a narrow bottom-edge strip.
+    # Keep every bowl footprint to the left of every mug footprint.
+    xlim:
+    - 0.24
+    - 0.29
+    ylim:
+    - -0.45
+    - 0.25
+  category:
+  - name: bowl
+    index: [11, 16]
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - bowl
+- common:
+    relative_plane: kitchen_island
+    # The smaller cup can extend farther toward the bottom edge; keep it on the right.
+    xlim:
+    - 0.24
+    - 0.33
+    ylim:
+    - 0.45
+    - 0.78
+  category:
+  - name: mug
+    index: [4, 5, 6]
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - mug
+Articulation:
+- common:
+    zlim:
+    - 0.348284676
+    - 0.348284676
+    qpos:
+    - 0.707106769
+    - 0.0
+    - 0.0
+    - 0.707106793
+    rotate_rand: false
+    relative_plane: Ground
+    xlim:
+    - -3.304855231
+    - -3.304855231
+    ylim:
+    - 1.116665403
+    - 1.116665403
+  category:
+  - name: dishwasher
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - dishwasher

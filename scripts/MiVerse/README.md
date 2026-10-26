@@ -36,6 +36,19 @@ the policy; the default is `ee`. For split evaluation, use `server` and `client`
 with the same policy settings and set `--policy-host` / `--policy-port` on the
 client as needed.
 
+The task inventory includes eight base tasks and their `_l` (language) and `_s`
+(spatial) variants, for 24 tasks in total. Use the full task name, for example
+`--task place_kettle_on_tv_stand_l`. Each variant uses its own eval layouts under
+`Assets/Eval_Layout/MiVerse/miverse/<seed>/<task>_<layout_id>.json`.
+
+For `_l` tasks, the instruction is the exact nonempty `instruction` saved in each
+layout; missing text is an error. Instructions refresh when the next layout
+batch loads. For `place_bread_in_oven_s`, the pickup surface is taken from that
+layout's bread object (`kitchen_island`, `cutting_board`, or `table`), so an old
+generic or mismatched instruction is rebuilt to name the actual surface.
+`throw_away_trash_s` refreshes the package name for each layout batch;
+`put_object_in_sink_s` retains the source task's generic instruction.
+
 ## Batch evaluation
 
 ```bash
@@ -50,12 +63,12 @@ bash scripts/MiVerse/miverse.sh benchmark \
 ```
 
 `smoke` defaults to one episode per task. `benchmark --eval-num native` uses the
-episode counts in `task/MiVerse/config/_task.yml` (currently 50 per task), even
-if `EVAL_NUM` is set in the parent shell. Repeat the command with `--seed 1` and
-`--seed 2` for the three-seed summary.
+episode counts in `task/MiVerse/config/_task.yml` (50 for base tasks and 25 for
+each `_l`/`_s` variant), even if `EVAL_NUM` is set in the parent shell. Repeat the
+command with `--seed 1` and `--seed 2` for the three-seed summary.
 
 Select tasks with `--only task_a,task_b`, `--tasks-file PATH`, or `--limit`.
-MiVerse has eight tasks and no capability dimensions. Execution is sequential
+MiVerse has 24 tasks and no capability dimensions. Execution is sequential
 by default. To divide tasks evenly across GPUs, add `--gpu-ids 0,1,2,3`.
 
 In batch `eval` mode, each task starts a fresh policy server. Batch `client`
@@ -72,17 +85,17 @@ it does not indicate policy task success.
 
 ## Result summaries
 
-The environment profile is named `miverse`, but saved results use its
-`config_name`, currently `miverse_teleop`:
+The environment profile is named `miverse`. Layouts and saved results use its
+`config_name`, also `miverse`:
 
 ```text
-eval_result/MiVerse/<task>/<policy>/miverse_teleop/<seed>_ckpt_name=...,action_type=.../<run_id>/_result.json
+eval_result/MiVerse/<task>/<policy>/miverse/<seed>_ckpt_name=...,action_type=.../<run_id>/_result.json
 ```
 
 ```bash
 bash scripts/MiVerse/miverse.sh summarize
 bash scripts/MiVerse/miverse.sh summarize \
-  --ckpt <CHECKPOINT> --action-type joint --env-cfg miverse_teleop
+  --ckpt <CHECKPOINT> --action-type joint --env-cfg miverse
 ```
 
 The summary script can also run directly:
@@ -95,14 +108,14 @@ python scripts/MiVerse/summarize_result.py \
 `--root` selects the result root containing task directories; otherwise
 `MIVERSE_EVAL_ROOT` or `eval_result/MiVerse` is used. `--output` overrides the
 default `<root>/_summary.md`. For summary filtering, `--env-cfg` is the result
-**config_name directory**, so use `miverse_teleop`, not the profile filename
-`miverse`.
+**config_name directory**, currently `miverse`. To summarize older runs stored
+under `miverse_teleop`, use `--env-cfg miverse_teleop` instead.
 
 Each result configuration and run label, including checkpoint and action type,
 forms a separate experiment. Summaries report success rate and score for all
-eight tasks and seeds 0, 1, 2, with progress out of 24 task/seed cells. A cell
-requires the task's native episode count (currently 50 valid records), and only
-the first such records are scored. The latest timestamp containing a result is
-used; an incomplete or invalid latest result does not fall back to an older
-completed result. Incomplete cells stay blank, and invalid files are reported
-in the terminal.
+24 tasks and seeds 0, 1, 2, with progress out of 72 task/seed cells. A cell
+requires the task's native episode count (50 for base tasks, 25 for variants),
+and only the first such records are scored. The latest timestamp containing a
+result is used; an incomplete or invalid latest result does not fall back to an
+older completed result. Incomplete cells stay blank, and invalid files are
+reported in the terminal.

@@ -50,6 +50,12 @@ class DescManager:
     def reset(self):
         self.instruction = [[] for _ in range(self.num_envs)]
         for env_idx in range(self.num_envs):
+            if (
+                getattr(getattr(self, "env", None), "refresh_instruction_on_reset", False)
+                and self.env.scene_manager.config.get(f"env{env_idx}") is not None
+            ):
+                # Saved layouts can move between environment slots each batch.
+                self.templates[env_idx] = self.env.gen_instruction(env_idx=env_idx)
             self.get_random_description(env_idx=env_idx)
 
     def get_random_description(self, env_idx):

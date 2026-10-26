@@ -1,0 +1,208 @@
+Navigation:
+  common:
+    include_volume_scale:
+    - 7.0
+    - 7.2
+    - 3.5
+    include_volume_position:
+    - 1.0
+    - 0.0
+    - 1.5
+    agent_radius: 0.3
+    agent_height: 2.0
+  MiVerse/LivingRoom/LivingRoom010:
+    robot_pose:
+      position:
+      - 1.35
+      - -1.65
+      - 0.0
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+# Same XY translation as the other coffee-table tasks; LivingRoom010 has a taller table.
+RoomTranslations:
+  coffee_table:
+    prim_path: CoffeeTable068
+    xlim: [-0.20, 0.20]
+    ylim: [-0.20, 0.50]
+    min_distance: 0.10
+    support_planes: [CoffeeTable068]
+    bounds:
+    - [-0.7954155405, -0.4449682252, -0.0000193390]
+    - [-0.0772342285, 0.2732130868, 0.5838466248]
+Rigid:
+- common:
+    margin: 0.02
+    need_check_stable: true
+    rotate_deg: 30
+    rotate_rand: true
+    place_tag: up
+    plane_mode: unique
+    CoffeeTable068:
+      # All package variants fit here with their upright yaw and collision margin.
+      xlim:
+      - -0.13
+      - 0.13
+      ylim:
+      - -0.13
+      - 0.13
+      rotate_rand: true
+      virtual_support:
+        frame:
+        - -0.4363248845
+        - -0.0858775692
+        - 0.5957311182
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - -0.209090656
+        - 0.209090656
+        ylim:
+        - -0.209090656
+        - 0.209090656
+  category:
+  - name: milk_box
+    index:
+    - 1
+  - name: bottle
+    index:
+    - 0
+    - 3
+    - 41
+  select_mode:
+    nums: 1
+    mode: unique
+    label:
+    - discarded_package
+Geometry:
+- common:
+    margin: 0.03
+    need_check_stable: false
+    rotate_rand: false
+    # Register both candidates so testscene shows both outdoor bin regions.
+    plane_mode: random
+    OutsideDoorLeft:
+      # Expand along the corridor, keeping the doorway between the two regions clear.
+      xlim:
+      - 2.65
+      - 3.80
+      ylim:
+      - -0.65
+      - 0.95
+      rotate_rand: false
+      virtual_support:
+        frame:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - 2.38
+        - 4.07
+        ylim:
+        - -0.92
+        - 1.22
+    OutsideDoorRight:
+      xlim:
+      - 2.65
+      - 3.80
+      ylim:
+      - -2.95
+      - -2.55
+      rotate_rand: false
+      virtual_support:
+        frame:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - 2.38
+        - 4.07
+        ylim:
+        - -3.22
+        - -2.28
+  category:
+  - name: dustbin
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - dustbin
+Dynamic:
+- common:
+    margin: 0.02
+    need_check_stable: false
+    rotate_rand: false
+    zlim:
+    - 0.05
+    - 0.05
+    plane_mode: unique
+    LivingRoomFloor:
+      xlim:
+      - 0.0
+      - 0.0
+      ylim:
+      - 1.85
+      - 1.85
+      rotate_rand: false
+      virtual_support:
+        frame:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - -2.0
+        - 2.0
+        ylim:
+        - -2.1
+        - 2.1
+      prohibited_areas:
+      # Keep vacuum spawning clear of the table's full translation envelope.
+      - name: coffee_table
+        shape: box
+        xlim:
+        - -1.10
+        - 0.23
+        ylim:
+        - -0.75
+        - 0.88
+      - name: tv_stand
+        shape: box
+        xlim:
+        - -2.1
+        - -1.55
+        ylim:
+        - -1.0
+        - 0.96
+      - center:
+        - 1.45
+        - -1.65
+        name: robot_start_clearance
+        radius: 0.52
+        shape: circle
+  category:
+  - name: robot_vacuum_2
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - robot_vacuum_obstacle

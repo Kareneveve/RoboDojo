@@ -2891,6 +2891,15 @@ class Func_Parser:
             )
             return 0.0
 
+        room_objects = args.get("room_objects")
+        if room_objects is not None:
+            if len(room_objects) != len(bounds):
+                raise ValueError("room_objects must have one entry per collision box")
+            bounds = bounds.copy()
+            for index, name in enumerate(room_objects):
+                if name is not None:
+                    bounds[index] += self.layout_manager.get_room_object_translation(env_idx, name)
+
         bbox_state_reader = getattr(self.robot_manager, "get_configured_collision_bbox_state", None)
         if not callable(bbox_state_reader):
             raise RuntimeError(
@@ -3003,6 +3012,12 @@ class Func_Parser:
             if z_bounds.shape != (2,):
                 logger.warning("z_bounds must contain two values for is_A_root_point_in_world_circle check.")
                 return 0.0
+
+        if args.get("room_object") is not None:
+            offset = self.layout_manager.get_room_object_translation(env_idx, args["room_object"])
+            center_xy = center_xy + offset[:2]
+            if z_bounds is not None:
+                z_bounds = z_bounds + offset[2]
 
         inst_name_A = self.layout_manager.get_instance_name(label=label_A, env_idx=env_idx)
         if inst_name_A is None:

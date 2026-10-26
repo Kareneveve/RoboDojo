@@ -112,6 +112,15 @@ class LayoutManager:
     def set_saved_layout(self, env_idx: int, layout):
         self.saved_layouts[env_idx] = layout
 
+    def get_room_object_translation(self, env_idx: int, name: str):
+        """Return the saved room-frame offset used by the loaded room geometry."""
+        layout = self.scene_manager.config.get(f"env{env_idx}")
+        entries = (layout.get("Room") or {}).get("object_translations", {}) if layout is not None else {}
+        offset = np.asarray(entries.get(name, {}).get("translation", [0.0, 0.0, 0.0]), dtype=float)
+        if offset.shape != (3,) or not np.isfinite(offset).all():
+            raise ValueError(f"Invalid saved room translation for {name} in env {env_idx}")
+        return offset.copy()
+
     def clear_object_records(self, env_idx_list=None):
         if env_idx_list is None:
             env_idx_list = list(range(self.num_envs))

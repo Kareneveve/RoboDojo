@@ -1,0 +1,95 @@
+Navigation:
+  common:
+    include_volume_scale:
+    - 5.0
+    - 5.0
+    - 3.5
+    include_volume_position:
+    - 0.0
+    - 0.0
+    - 1.5
+    agent_radius: 0.3
+    agent_height: 2.0
+  MiVerse/LivingRoom/LivingRoom009_notv:
+    robot_pose:
+      position:
+      - 1.35
+      - -1.65
+      - 0.0
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+Articulation:
+- common:
+    margin: 0.02
+    rotate_rand: false
+    need_check_stable: true
+    plane_mode: unique
+    CoffeeTable068:
+      xlim:
+      - -0.05164065600000002
+      - 0.05164065600000002
+      ylim:
+      - -0.07214065600000001
+      - 0.07214065600000001
+      rotate_rand: false
+      virtual_support:
+        frame:
+        - -0.4363248845
+        - -0.0858775692
+        - 0.4857311182
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - -0.209090656
+        - 0.209090656
+        ylim:
+        - -0.209090656
+        - 0.209090656
+  category:
+  - name: electric_kettle_2
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - electric_kettle
+# Television011 from LivingRoom009, respawned as a labeled free-standing
+# articulation at its authored pose so the reward manager can detect contact
+# through pose drift. z is lifted 1 mm above the authored value so the body
+# settles onto TvStand051 instead of starting interpenetrated.
+- common:
+    check_mode: enforce
+    margin: 0.0
+    need_check_stable: true
+    pose_mode: absolute
+    qpos:
+    - 0.707106769
+    - 0.0
+    - 0.0
+    - 0.707106793
+    rotate_rand: false
+    zlim:
+    - 0.8965112653
+    - 0.8965112653
+    relative_plane: Ground
+    xlim:
+    - -1.8294844596
+    - -1.8294844596
+    ylim:
+    - 0.1491607039
+    - 0.1491607039
+  category:
+  - name: television
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - television

@@ -1,0 +1,215 @@
+Navigation:
+  common:
+    include_volume_scale:
+    - 8.0
+    - 5.0
+    - 3.5
+    include_volume_position:
+    - 0.0
+    - 0.0
+    - 1.5
+    agent_radius: 0.3
+    agent_height: 2.0
+  MiVerse/Kitchen/Kitchen009:
+    robot_pose:
+      position:
+      - 1.22
+      - -0.97
+      - 0.0
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+Rigid:
+- common:
+    margin: 0.0
+    rotate_deg: 15
+    rotate_rand: false
+    plane_mode: unique
+    StoveRightCounter:
+      xlim:
+      - 0.098
+      - 0.102
+      ylim:
+      - -0.002
+      - 0.002
+      rotate_rand: false
+      virtual_support:
+        frame:
+        - -3.279
+        - 1.466
+        - 0.84013
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        xlim:
+        - -0.25
+        - 0.25
+        ylim:
+        - -0.75
+        - 0.25
+      prohibited_areas:
+      - name: electric_kettle
+        shape: box
+        xlim:
+        - -0.16
+        - 0.032
+        ylim:
+        - -0.595
+        - -0.306
+  category:
+  - name: cutting_board
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - cutting_board
+- common:
+    margin: 0.0
+    rotate_rand: false
+    plane_mode: random
+    cutting_board:
+      xlim:
+      - -0.03
+      - 0.03
+      ylim:
+      - -0.03
+      - 0.03
+      rotate_rand: false
+    kitchen_island:
+      xlim:
+      - 0.05249999999999997
+      - 0.3249999999999997
+      ylim:
+      - -0.12145000000000002
+      - 0.36344999999999994
+      rotate_rand: false
+    table:
+      xlim:
+      - -0.21
+      - 0.21
+      ylim:
+      - -0.55
+      - -0.41
+      rotate_rand: false
+  category:
+  - name: mug
+    index:
+    - 4
+    - 5
+    - 8
+    - 13
+    - 18
+  - name: bowl
+    index:
+    - 0
+    - 1
+    - 3
+    - 4
+    - 11
+  select_mode:
+    mode: hierarchical
+    select_category_nums:
+    - 1
+    - 1
+    select_instance_nums:
+    - 1
+    - 1
+    instance_sample_mode: unique
+    label:
+    - target
+    nums: 1
+Geometry:
+- common:
+    check_mode: enforce
+    margin: 0.0
+    need_check_stable: false
+    qpos:
+    - 0.707106781
+    - 0.0
+    - 0.0
+    - 0.707106781
+    rotate_rand: false
+    zlim:
+    - 0.350361473
+    - 0.350361473
+    relative_plane: Ground
+    xlim:
+    - -1.040710649
+    - -1.040710649
+    ylim:
+    - -1.160618559
+    - -1.160618559
+  category:
+  - name: kitchen_island
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - kitchen_island
+- common:
+    check_mode: enforce
+    margin: 0.0
+    need_check_stable: false
+    qpos:
+    - 0.707106769
+    - 0.0
+    - 0.0
+    - 0.707106793
+    rotate_rand: false
+    zlim:
+    - 0.3174
+    - 0.3174
+    relative_plane: Ground
+    xlim:
+    - 1.299573199
+    - 1.299573199
+    ylim:
+    - 0.706951557
+    - 0.706951557
+  category:
+  - name: table
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - table
+Articulation:
+- common:
+    check_mode: enforce
+    margin: 0.0
+    need_check_stable: true
+    pose_mode: absolute
+    qpos:
+    - 0.7071067690849304
+    - 0.0
+    - 0.0
+    - 0.7071067932881644
+    rotate_rand: false
+    zlim:
+    - 0.9580781764885563
+    - 0.9580781764885563
+    relative_plane: Ground
+    xlim:
+    - -1.5378939337523638
+    - -1.5378939337523638
+    ylim:
+    - 1.73829161218059
+    - 1.73829161218059
+  category:
+  - name: electric_cooker_2
+    index:
+    - 0
+  select_mode:
+    nums: 1
+    mode: same
+    label:
+    - electric_cooker

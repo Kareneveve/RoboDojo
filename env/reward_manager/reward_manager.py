@@ -1328,12 +1328,15 @@ class RewardManager:
         world_bounds,
         robot_index=0,
         atol=0.0,
+        room_objects=None,
     ):
         args = {
             "world_bounds": world_bounds,
             "robot_index": robot_index,
             "atol": atol,
         }
+        if room_objects is not None:
+            args["room_objects"] = room_objects
         return ("is_robot_bbox_intersecting_world_bbox", args)
 
     def is_A_root_point_in_world_bbox(
@@ -1356,6 +1359,7 @@ class RewardManager:
         radius,
         z_bounds=None,
         atol=1e-6,
+        room_object=None,
     ):
         args = {
             "label_A": label_A,
@@ -1364,6 +1368,8 @@ class RewardManager:
             "z_bounds": z_bounds,
             "atol": atol,
         }
+        if room_object is not None:
+            args["room_object"] = room_object
         return ("is_A_root_point_in_world_circle", args)
 
     def is_no_ee_close_to_A(self, label, distance_threshold=0.15):
