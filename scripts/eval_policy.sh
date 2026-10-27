@@ -6,17 +6,17 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/XPolicyLab:${PYTHONPATH:-}"
 echo "[INFO] PYTHONPATH=${PYTHONPATH}"
 
-# Usage:
-#   bash eval_policy.sh <task_name> <env_cfg_type> <device_id> <policy_name> <port> [extra-args...]
+# Usage: named arguments below are supplied by the shared CLI or XPolicyLab.
 
 if [[ $# -lt 5 ]]; then
-  echo "usage: bash eval_policy.sh <task_name> <env_cfg_type> <device_id> <policy_name> <port> [extra-args...]" >&2
+  echo "usage: bash eval_policy.sh --root_dir PATH --task_name TASK --env_cfg_type PROFILE --device_id GPU --policy_name POLICY --port PORT --seed SEED [extra-args...]" >&2
   exit 1
 fi
 
 root_dir=""
 task_name=""
 env_cfg_type=""
+bench_name=""
 device_id=""
 policy_name=""
 port=""
@@ -30,7 +30,7 @@ extra_args=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --root_dir|--task_name|--env_cfg_type|--device_id|--policy_name|--port|--eval_batch|--additional_info|--seed|--host|--protocol|--policy_server_url)
+    --root_dir|--task_name|--env_cfg_type|--bench_name|--dataset_name|--device_id|--policy_name|--port|--eval_batch|--additional_info|--seed|--host|--protocol|--policy_server_url)
       if [[ $# -lt 2 || "$2" == --* ]]; then
         echo "[ERROR] Missing value for argument: $1"
         exit 1
@@ -40,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --root_dir)    root_dir="$2" ;;
         --task_name)   task_name="$2" ;;
         --env_cfg_type)     env_cfg_type="$2" ;;
+        --bench_name|--dataset_name) bench_name="$2" ;;
         --device_id)   device_id="$2" ;;
         --policy_name) policy_name="$2" ;;
         --port)        port="$2" ;;
@@ -73,6 +74,24 @@ if [[ ! -f "$cfg_file" ]]; then
   echo "[ERROR] Config file not found: $cfg_file" >&2
   exit 1
 fi
+
+# main.py resolves the benchmark from this profile; benchmark selectors are
+# launcher metadata, not simulator arguments. Reject inconsistent selections.
+if [[ -n "${bench_name}" ]]; then
+  python3 "${PROJECT_ROOT}/scripts/internal/benchmark_profile.py" \
+    --bench "${bench_name}" --env-cfg "${env_cfg_type}" >/dev/null
+fi
+
+# Reject invalid result labels before Kit starts and takes over process exit.
+python3 - "${additional_info}" <<'PY'
+import sys
+from env.benchmark import encode_result_info
+
+try:
+    encode_result_info(sys.argv[1])
+except ValueError as exc:
+    sys.exit(f"[ERROR] {exc}")
+PY
 
 # Resolve sim config file from cfg_file: env_cfg/<name>.yml -> config.sim
 sim_cfg_name="$(python3 -c "import sys,yaml;print(yaml.safe_load(open(sys.argv[1]))['config']['sim'])" "$cfg_file")"
@@ -125,8 +144,6 @@ fi
 echo "[INFO] render_interval = ${render_interval}"
 echo "[INFO] num_envs        = ${num_envs}"
 
-extra_args=()
-
 KIT_ENABLE_EXTS=(
   "isaacsim.replicator.behavior"
   "isaacsim.sensors.camera"
@@ -138,15 +155,25 @@ for ext in "${KIT_ENABLE_EXTS[@]}"; do
 done
 
 # Generated once per eval invocation. Carries the same identity through
-# os.execv inside main.py and bash-level retries below. Append $$ to
-# defuse same-second collisions when the same task/config is launched
-# in parallel.
+# os.execv inside main.py and bash-level retries below.
 if [[ -z "${ROBODOJO_RUN_ID:-}" ]]; then
   export ROBODOJO_RUN_ID="$(date +%Y-%m-%d_%H-%M-%S)"
 fi
 echo "[eval_policy] ROBODOJO_RUN_ID=${ROBODOJO_RUN_ID}"
 
 MAX_BASH_RETRIES="${ROBODOJO_MAX_BASH_RETRIES:-10}"
+source "${PROJECT_ROOT}/scripts/internal/process_utils.sh"
+cleanup() {
+  trap - EXIT
+  trap '' INT TERM
+  if [[ -n "${CLIENT_PID:-}" ]]; then
+    _stop_process_tree "${CLIENT_PID}"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 attempt=0
 while : ; do
   set +e
@@ -165,9 +192,11 @@ while : ; do
     --seed "$seed" \
     --host "$host" \
     --headless \
-    "${extra_args[@]}" \
-    "$@"
+    "${extra_args[@]}" &
+  CLIENT_PID=$!
+  wait "${CLIENT_PID}"
   rc=$?
+  CLIENT_PID=""
   set -e
   case "$rc" in
     0)

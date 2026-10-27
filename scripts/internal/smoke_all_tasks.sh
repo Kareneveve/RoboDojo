@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Internal smoke/benchmark sweep for runnable RoboDojo tasks.
+# Shared smoke/benchmark sweep; benchmark-specific settings are resolved centrally.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${ROOT_DIR}/scripts/internal/process_utils.sh"
 
 dataset="RoboDojo"
 execution_mode="eval"
 ckpt=""
-env_cfg="arx_x5"
+env_cfg=""
 expert_num="100"
 action_type="ee"
 seed="0"
@@ -18,7 +19,7 @@ policy_gpu_ids=""
 env_gpu_ids=""
 policy_env=""
 eval_env="RoboDojo"
-eval_num="1"
+eval_num="${EVAL_NUM:-1}"
 policy_name=""
 policy_host=""
 policy_port=""
@@ -26,6 +27,7 @@ bind_host="0.0.0.0"
 connect_timeout="5"
 policy_dir=""
 run_id="$(date +%Y-%m-%d_%H-%M-%S)_smoke"
+run_id_explicit="false"
 summary_path=""
 markdown_path=""
 log_dir=""
@@ -41,16 +43,15 @@ usage() {
   cat <<'EOF'
 Usage: bash scripts/internal/smoke_all_tasks.sh [options]
 
-Runs RoboDojo tasks through scripts/robodojo.sh eval, client, or server. Default is
-sequential; pass `--gpu-ids` or `--policy-gpu-ids/--env-gpu-ids` for balanced
-multi-GPU parallel execution.
+Runs selected benchmark tasks through scripts/evaluate.sh eval, client, or server. Default is
+sequential; pass `--gpu-ids` or `--policy-gpu-ids/--env-gpu-ids` for multi-GPU execution. RoboDojo/arx_x5 uses measured runtime weights;
+other profiles use task-count balancing.
 
 Options:
   --mode NAME         Internal runner mode: eval, client, or server (default: eval).
   --only a,b,c        Comma-separated task subset.
   --tasks-file PATH   Newline-separated task subset. Comments and blank lines are ignored.
-  --dimension NAMES   Run capability dimensions (comma-separated or repeated):
-                      generalization, memory, precision, long-horizon, open, all.
+  --dimension NAMES  RoboDojo capability dimensions; MiVerse accepts only all.
   --gpu-ids IDS       Balanced multi-GPU sweep. Comma-separated ids, reused for policy+env.
   --policy-gpu-ids IDS  Optional per-worker policy GPU ids. Defaults to --gpu-ids.
   --env-gpu-ids IDS     Optional per-worker env GPU ids. Defaults to --gpu-ids.
@@ -59,13 +60,13 @@ Options:
   --dry-run           Print eval commands and mark tasks DRY_RUN without launching eval.
   --all               Explicitly run all runnable tasks (default when --only is omitted).
   --limit NUM         Run only the first NUM tasks after filtering.
-  --summary PATH      JSON summary path (default: smoke_results/<run_id>.json)
-  --markdown PATH     Markdown summary path (default: smoke_results/<run_id>.md)
+  --summary PATH      JSON summary (RoboDojo: smoke_results/; MiVerse: smoke_results/MiVerse/)
+  --markdown PATH     Markdown summary (same default directory as --summary)
   --run-id ID         Stable run id used in result paths and summaries.
   --eval-num NUM      Episode count for each task (default: 1). Use `native` to use per-task counts from _task.yml.
-  --dataset NAME      eval.sh dataset arg (default: RoboDojo)
+  --bench NAME        Benchmark: RoboDojo (default) or MiVerse; --dataset is an alias.
   --ckpt NAME         Policy checkpoint name (required)
-  --env-cfg NAME      env_cfg stem (default: arx_x5)
+  --env-cfg NAME      Profile stem (default: arx_x5 for RoboDojo, miverse for MiVerse)
   --expert-num NUM    Expert data count argument (default: 100)
   --action-type NAME  Policy action type (default: ee)
   --seed NUM          Eval seed / layout seed (default: 0)
@@ -77,20 +78,20 @@ Options:
   --policy-gpu ID     GPU id for policy server (default: 0)
   --env-gpu ID        GPU id for Isaac Sim client (default: 0)
   --policy-env NAME   Policy conda env or uv env path (required)
-  --eval-env NAME     Simulator conda env (default: RoboDojo)
+  --eval-env NAME     Simulator conda env in eval mode (default: RoboDojo); client uses the active environment.
   --policy-dir PATH   Policy directory containing eval.sh (required)
   -h, --help          Show this help
 
 Examples:
-  bash scripts/internal/smoke_all_tasks.sh --policy-dir XPolicyLab/policy/demo_policy --ckpt ckpt --policy-env env --only stack_bowls
-  bash scripts/internal/smoke_all_tasks.sh --policy-dir XPolicyLab/policy/demo_policy --ckpt ckpt --policy-env env --dimension memory
-  bash scripts/internal/smoke_all_tasks.sh --policy-dir XPolicyLab/policy/demo_policy --ckpt ckpt --policy-env env --eval-num native --gpu-ids 0,1,2,3
+  bash scripts/internal/smoke_all_tasks.sh --bench MiVerse --policy-dir XPolicyLab/policy/demo_policy --ckpt ckpt --policy-env env --only place_kettle_on_tv_stand
+  bash scripts/internal/smoke_all_tasks.sh --bench MiVerse --policy-dir XPolicyLab/policy/demo_policy --ckpt ckpt --policy-env env --dimension all
+  bash scripts/internal/smoke_all_tasks.sh --bench MiVerse --policy-dir XPolicyLab/policy/demo_policy --ckpt ckpt --policy-env env --eval-num native --gpu-ids 0,1,2,3
 EOF
 }
 
 need_value() {
   if [[ $# -lt 2 || "$2" == --* ]]; then
-    echo "[smoke_all_tasks] Missing value for $1" >&2
+    echo "[bench batch] Missing value for $1" >&2
     exit 2
   fi
 }
@@ -121,9 +122,9 @@ while [[ $# -gt 0 ]]; do
     --limit) need_value "$@"; limit="$2"; shift 2 ;;
     --summary) need_value "$@"; summary_path="$2"; shift 2 ;;
     --markdown) need_value "$@"; markdown_path="$2"; shift 2 ;;
-    --run-id) need_value "$@"; run_id="$2"; shift 2 ;;
+    --run-id) need_value "$@"; run_id="$2"; run_id_explicit="true"; shift 2 ;;
     --eval-num) need_value "$@"; eval_num="$2"; shift 2 ;;
-    --dataset) need_value "$@"; dataset="$2"; shift 2 ;;
+    --bench|--dataset) need_value "$@"; dataset="$2"; shift 2 ;;
     --ckpt) need_value "$@"; ckpt="$2"; shift 2 ;;
     --env-cfg) need_value "$@"; env_cfg="$2"; shift 2 ;;
     --expert-num) need_value "$@"; expert_num="$2"; shift 2 ;;
@@ -144,21 +145,39 @@ while [[ $# -gt 0 ]]; do
     --policy-dir) need_value "$@"; policy_dir="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
-      echo "[smoke_all_tasks] Unknown argument: $1" >&2
+      echo "[bench batch] Unknown argument: $1" >&2
       usage >&2
       exit 2
       ;;
   esac
 done
 
-dimension_args=(--resolve-dimensions)
+resolved_profile="$(python3 "${ROOT_DIR}/scripts/internal/benchmark_profile.py" \
+  --dataset "${dataset}" --env-cfg "${env_cfg}")"
+IFS=$'\t' read -r dataset env_cfg result_config <<< "${resolved_profile}"
+if [[ "${eval_num}" == native ]]; then
+  unset EVAL_NUM
+elif [[ ! "${eval_num}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[bench batch] --eval-num must be a positive integer or native" >&2
+  exit 2
+fi
+if [[ -n "${limit}" && ! "${limit}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[bench batch] --limit must be a positive integer" >&2
+  exit 2
+fi
+
+dimension_args=(--dataset "${dataset}" --resolve-dimensions)
 if [[ -n "${dimensions}" ]]; then
   dimension_args+=(--dimension "${dimensions}")
 fi
 dimensions="$(python3 "${ROOT_DIR}/scripts/internal/task_inventory.py" "${dimension_args[@]}")"
 
 if [[ "${execution_mode}" != "eval" && "${execution_mode}" != "client" && "${execution_mode}" != "server" ]]; then
-  echo "[smoke_all_tasks] --mode must be eval, client, or server" >&2
+  echo "[bench batch] --mode must be eval, client, or server" >&2
+  exit 2
+fi
+if [[ "${execution_mode}" == "server" && "${resume}" == "true" ]]; then
+  echo "[bench batch] --resume applies to eval/client results, not persistent policy servers" >&2
   exit 2
 fi
 
@@ -168,68 +187,154 @@ fi
 
 if [[ "${execution_mode}" == "eval" ]]; then
   if [[ -z "${policy_dir}" || -z "${ckpt}" || -z "${policy_env}" ]]; then
-    echo "[smoke_all_tasks] eval mode requires --policy-dir, --ckpt, and --policy-env" >&2
+    echo "[bench batch] eval mode requires --policy-dir, --ckpt, and --policy-env" >&2
     usage >&2
     exit 2
   fi
   if [[ ! -f "${policy_dir}/eval.sh" ]]; then
-    echo "[smoke_all_tasks] policy eval.sh not found: ${policy_dir}/eval.sh" >&2
+    echo "[bench batch] policy eval.sh not found: ${policy_dir}/eval.sh" >&2
     exit 1
   fi
   policy_name="$(basename "$(cd "${policy_dir}" && pwd)")"
 elif [[ "${execution_mode}" == "client" ]]; then
+  ckpt="${ckpt:-external}"
   if [[ -n "${policy_dir}" ]]; then
     policy_name="$(basename "$(cd "${policy_dir}" && pwd)")"
   fi
   if [[ -z "${policy_name}" || -z "${policy_host}" || -z "${policy_port}" ]]; then
-    echo "[smoke_all_tasks] client mode requires --policy-name or --policy-dir, plus --policy-host and --policy-port" >&2
+    echo "[bench batch] client mode requires --policy-name or --policy-dir, plus --policy-host and --policy-port" >&2
     usage >&2
     exit 2
   fi
   if [[ ! -f "${ROOT_DIR}/XPolicyLab/policy/${policy_name}/deploy.py" ]]; then
-    echo "[smoke_all_tasks] policy deploy adapter not found: ${ROOT_DIR}/XPolicyLab/policy/${policy_name}/deploy.py" >&2
+    echo "[bench batch] policy deploy adapter not found: ${ROOT_DIR}/XPolicyLab/policy/${policy_name}/deploy.py" >&2
     exit 1
   fi
 else
   if [[ -z "${policy_dir}" || -z "${ckpt}" || -z "${policy_env}" || -z "${policy_port}" ]]; then
-    echo "[smoke_all_tasks] server mode requires --policy-dir, --ckpt, --policy-env, and --policy-port" >&2
+    echo "[bench batch] server mode requires --policy-dir, --ckpt, --policy-env, and --policy-port" >&2
     usage >&2
     exit 2
   fi
   if [[ ! -f "${policy_dir}/setup_eval_policy_server.sh" ]]; then
-    echo "[smoke_all_tasks] policy server setup script not found: ${policy_dir}/setup_eval_policy_server.sh" >&2
+    echo "[bench batch] policy server setup script not found: ${policy_dir}/setup_eval_policy_server.sh" >&2
     exit 1
   fi
   policy_name="$(basename "$(cd "${policy_dir}" && pwd)")"
 fi
 
-summary_path="${summary_path:-${ROOT_DIR}/smoke_results/${run_id}.json}"
-markdown_path="${markdown_path:-${ROOT_DIR}/smoke_results/${run_id}.md}"
-log_dir="${ROOT_DIR}/smoke_results/${run_id}/logs"
-mkdir -p "$(dirname "${summary_path}")" "$(dirname "${markdown_path}")" "${log_dir}"
+# Use the same directory encoding as the simulator; the checkpoint passed to
+# policy launchers and recorded in the sweep identity remains unchanged.
+result_info="$(python3 - "${ROOT_DIR}" "${ckpt}" "${action_type}" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from env.benchmark import encode_result_info
+print(encode_result_info(f"ckpt_name={sys.argv[2]},action_type={sys.argv[3]}"))
+PY
+)"
+
+summary_root="${ROOT_DIR}/smoke_results"
+[[ "${dataset}" == RoboDojo ]] || summary_root+="/${dataset}"
+summary_path="${summary_path:-${summary_root}/${run_id}.json}"
 
 RESULTS_TSV="$(mktemp)"
-trap 'rm -f "${RESULTS_TSV}"' EXIT
+RESULTS_SAVED="true"
+CURRENT_LAUNCH_PID=""
+ACTIVE_WORKER_PIDS=()
+BATCH_TASKS_FILE=""
+BATCH_META_DIR=""
+BATCH_RESULTS_MERGED="true"
+BATCH_PARENT_PID="${BASHPID}"
+cleanup() {
+  trap - EXIT
+  trap '' INT TERM
+  local pid
+  [[ -z "${CURRENT_LAUNCH_PID}" ]] || _stop_process_tree "${CURRENT_LAUNCH_PID}"
+  for pid in "${ACTIVE_WORKER_PIDS[@]}"; do
+    _stop_process_tree "${pid}"
+  done
+  # Only the coordinator owns shared summaries and temporary worker files.
+  [[ "${BASHPID}" == "${BATCH_PARENT_PID}" ]] || return 0
+  if [[ -n "${BATCH_META_DIR}" && "${execution_mode}" != "server" && "${BATCH_RESULTS_MERGED}" != "true" ]]; then
+    if ! merge_parallel_results; then
+      echo "[bench batch] could not merge interrupted results; retained ${RESULTS_TSV} and ${BATCH_META_DIR}" >&2
+      return 0
+    fi
+  fi
+  if [[ "${RESULTS_SAVED}" != "true" ]] && ! write_summaries; then
+    echo "[bench batch] could not save summary; retained ${RESULTS_TSV} ${BATCH_META_DIR}" >&2
+    return 0
+  fi
+  rm -f "${RESULTS_TSV}"
+  [[ -z "${BATCH_TASKS_FILE}" ]] || rm -f "${BATCH_TASKS_FILE}"
+  [[ -z "${BATCH_META_DIR}" ]] || rm -rf "${BATCH_META_DIR}"
+  return 0
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ "${resume}" == "true" && -f "${summary_path}" ]]; then
-  python3 - "${summary_path}" "${RESULTS_TSV}" <<'PY'
+  run_id="$(python3 - "${summary_path}" "${RESULTS_TSV}" "${dataset}" "${env_cfg}" "${result_config}" \
+    "${policy_name}" "${ckpt}" "${action_type}" "${seed}" "${eval_num}" "${run_id}" "${run_id_explicit}" "${ROOT_DIR}" "${execution_mode}" <<'PY'
 import csv
 import json
 from pathlib import Path
 import sys
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+saved_mode = payload.get("execution_mode", "eval")
+if saved_mode != sys.argv[14]:
+    raise SystemExit(f"Cannot resume: summary execution_mode={saved_mode!r}, requested {sys.argv[14]!r}.")
+keys = ("benchmark", "env_cfg", "config_name", "policy", "ckpt", "action_type", "seed", "eval_num")
+expected = dict(zip(keys, sys.argv[3:11]))
+missing = [key for key in keys if key not in payload]
+if missing and expected["benchmark"] == "RoboDojo" and not any(key in payload for key in keys[:-1]):
+    # Older RoboDojo summaries stored experiment identity only in result paths.
+    # Validate those paths before allowing a legacy sweep to resume.
+    result_root = Path(sys.argv[13]) / "eval_result" / "RoboDojo"
+    sys.path.insert(0, sys.argv[13])
+    from env.benchmark import encode_result_info
+    info = f"ckpt_name={expected['ckpt']},action_type={expected['action_type']}"
+    experiments = {f"{expected['seed']}_{info}", f"{expected['seed']}_{encode_result_info(info)}"}
+    for row in payload.get("results", []):
+        result = Path(row.get("result_path", ""))
+        task = row.get("task", "")
+        expected_parents = {
+            result_root / task / expected["policy"] / expected["config_name"] / experiment
+            for experiment in experiments
+        }
+        if not task or result.name != "_result.json" or result.parent.parent not in expected_parents:
+            raise SystemExit("Cannot resume: legacy summary result paths do not match the requested experiment.")
+    payload.update({key: expected[key] for key in missing if key != "eval_num"})
+    missing = [key for key in keys if key not in payload]
+if missing:
+    raise SystemExit(f"Cannot resume: summary is missing {', '.join(missing)}.")
+for key, value in expected.items():
+    if key in payload and str(payload[key]) != value:
+        raise SystemExit(f"Cannot resume: summary {key}={payload[key]!r}, requested {value!r}.")
+saved_run_id = payload.get("run_id")
+if not isinstance(saved_run_id, str) or not saved_run_id:
+    raise SystemExit("Cannot resume: summary is missing run_id.")
+if sys.argv[12] == "true" and saved_run_id != sys.argv[11]:
+    raise SystemExit(f"Cannot resume: summary run_id={saved_run_id!r}, requested {sys.argv[11]!r}.")
 fieldnames = ["status", "task", "exit_code", "eval_time", "elapsed_sec", "result_path", "log_path", "message"]
 with open(sys.argv[2], "w", encoding="utf-8", newline="") as f:
     writer = csv.DictWriter(f, delimiter="\t", fieldnames=fieldnames)
     writer.writeheader()
     for row in payload.get("results", []):
         writer.writerow({key: row.get(key, "") for key in fieldnames})
+print(saved_run_id)
 PY
+  )"
 fi
 
+markdown_path="${markdown_path:-${summary_root}/${run_id}.md}"
+log_dir="${summary_root}/${run_id}/logs"
+mkdir -p "$(dirname "${summary_path}")" "$(dirname "${markdown_path}")" "${log_dir}"
+
 load_tasks() {
-  python3 - "${ROOT_DIR}" "${only_tasks}" "${tasks_file}" "${limit}" "${dimensions}" <<'PY'
+  python3 - "${ROOT_DIR}" "${only_tasks}" "${tasks_file}" "${limit}" "${dimensions}" "${dataset}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -238,6 +343,7 @@ only = sys.argv[2]
 tasks_file = sys.argv[3]
 limit = sys.argv[4]
 dimensions = sys.argv[5]
+dataset = sys.argv[6]
 sys.path.insert(0, str(root))
 
 import subprocess
@@ -245,6 +351,7 @@ inventory_cmd = [
     sys.executable,
     str(root / "scripts" / "internal" / "task_inventory.py"),
     "--only-runnable",
+    "--dataset", dataset,
 ]
 if dimensions:
     inventory_cmd.extend(["--dimension", dimensions])
@@ -275,7 +382,7 @@ PY
 passed_in_summary() {
   local task="$1"
   [[ -s "${RESULTS_TSV}" ]] || return 1
-  python3 - "${RESULTS_TSV}" "${task}" <<'PY'
+  python3 - "${RESULTS_TSV}" "${task}" "${TASK_EPISODES[${task}]}" <<'PY'
 import csv
 from pathlib import Path
 import sys
@@ -283,23 +390,31 @@ import sys
 path = Path(sys.argv[1])
 task = sys.argv[2]
 latest_status = None
+latest_count = 0
 if path.exists():
     with path.open(encoding="utf-8", newline="") as f:
         for row in csv.DictReader(f, delimiter="\t"):
             if row.get("task") == task:
                 latest_status = row.get("status")
-raise SystemExit(0 if latest_status == "PASS" else 1)
+                try:
+                    latest_count = int(row.get("eval_time", "0"))
+                except ValueError:
+                    latest_count = 0
+raise SystemExit(0 if latest_status == "PASS" and latest_count >= int(sys.argv[3]) else 1)
 PY
 }
 
 write_summaries() {
-  python3 - "${RESULTS_TSV}" "${summary_path}" "${markdown_path}" "${run_id}" "${eval_num}" "${dimensions}" <<'PY'
+  RESULTS_SAVED="false"
+  python3 - "${RESULTS_TSV}" "${summary_path}" "${markdown_path}" "${run_id}" "${eval_num}" "${dimensions}" \
+    "${dataset}" "${env_cfg}" "${result_config}" "${policy_name}" "${ckpt}" "${action_type}" "${seed}" "${execution_mode}" <<'PY' || return 1
 import csv
 import json
 from pathlib import Path
 import sys
 
-tsv_path, json_path, md_path, run_id, eval_num, dimensions = sys.argv[1:]
+tsv_path, json_path, md_path, run_id, eval_num, dimensions = sys.argv[1:7]
+dataset, env_cfg, config_name, policy, ckpt, action_type, seed, execution_mode = sys.argv[7:]
 raw_rows = []
 if Path(tsv_path).exists():
     with open(tsv_path, encoding="utf-8", newline="") as f:
@@ -323,6 +438,14 @@ except ValueError:
     eval_num_value = eval_num
 payload = {
     "run_id": run_id,
+    "benchmark": dataset,
+    "execution_mode": execution_mode,
+    "env_cfg": env_cfg,
+    "config_name": config_name,
+    "policy": policy,
+    "ckpt": ckpt,
+    "action_type": action_type,
+    "seed": seed,
     "eval_num": eval_num_value,
     "dimensions": [item for item in dimensions.split(",") if item],
     "counts": counts,
@@ -331,8 +454,10 @@ payload = {
 Path(json_path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 lines = [
-    f"# RoboDojo Smoke Summary `{run_id}`",
+    f"# {dataset} Smoke Summary `{run_id}`",
     "",
+    f"- mode: `{execution_mode}`; profile: `{env_cfg}`; result config: `{config_name}`",
+    f"- policy: `{policy}`; checkpoint: `{ckpt}`; action: `{action_type}`; seed: `{seed}`",
     f"- eval_num: `{eval_num}`",
     f"- dimensions: `{dimensions or 'all'}`",
     f"- pass: `{counts['PASS']}`",
@@ -350,6 +475,7 @@ for row in rows:
     )
 Path(md_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
+  RESULTS_SAVED="true"
 }
 
 count_failures() {
@@ -400,7 +526,7 @@ resolve_gpu_workers() {
   fi
 
   if [[ "${#POLICY_GPU_WORKERS[@]}" -ne "${#ENV_GPU_WORKERS[@]}" ]]; then
-    echo "[smoke_all_tasks] policy/env gpu worker count mismatch" >&2
+    echo "[bench batch] policy/env gpu worker count mismatch" >&2
     exit 2
   fi
 }
@@ -418,17 +544,17 @@ resolve_client_endpoints() {
   IFS=',' read -r -a ports <<< "${policy_port}"
 
   if [[ "${group_count}" -lt 1 ]]; then
-    echo "[smoke_all_tasks] invalid client group count: ${group_count}" >&2
+    echo "[bench batch] invalid client group count: ${group_count}" >&2
     exit 2
   fi
   if [[ "${#hosts[@]}" -lt 1 || "${#ports[@]}" -lt 1 ]]; then
-    echo "[smoke_all_tasks] client mode requires non-empty --policy-host and --policy-port" >&2
+    echo "[bench batch] client mode requires non-empty --policy-host and --policy-port" >&2
     exit 2
   fi
 
   if [[ "${#hosts[@]}" -eq 1 ]]; then
     if [[ "${#ports[@]}" -ne "${group_count}" ]]; then
-      echo "[smoke_all_tasks] single host mode requires --policy-port count to equal group count (${group_count})" >&2
+      echo "[bench batch] single host mode requires --policy-port count to equal group count (${group_count})" >&2
       exit 2
     fi
     for (( idx=0; idx<group_count; idx++ )); do
@@ -439,11 +565,11 @@ resolve_client_endpoints() {
   fi
 
   if [[ "${#hosts[@]}" -ne "${group_count}" ]]; then
-    echo "[smoke_all_tasks] multi-host mode requires --policy-host count to equal group count (${group_count})" >&2
+    echo "[bench batch] multi-host mode requires --policy-host count to equal group count (${group_count})" >&2
     exit 2
   fi
   if [[ "${#ports[@]}" -ne "${group_count}" ]]; then
-    echo "[smoke_all_tasks] multi-host mode requires --policy-port count to equal group count (${group_count})" >&2
+    echo "[bench batch] multi-host mode requires --policy-port count to equal group count (${group_count})" >&2
     exit 2
   fi
 
@@ -466,11 +592,11 @@ resolve_server_endpoints() {
   IFS=',' read -r -a ports <<< "${policy_port}"
 
   if [[ "${group_count}" -lt 1 ]]; then
-    echo "[smoke_all_tasks] invalid server group count: ${group_count}" >&2
+    echo "[bench batch] invalid server group count: ${group_count}" >&2
     exit 2
   fi
   if [[ "${#ports[@]}" -ne "${group_count}" ]]; then
-    echo "[smoke_all_tasks] server mode requires --policy-port count to equal group count (${group_count})" >&2
+    echo "[bench batch] server mode requires --policy-port count to equal group count (${group_count})" >&2
     exit 2
   fi
   if [[ "${#hosts[@]}" -eq 1 ]]; then
@@ -481,7 +607,7 @@ resolve_server_endpoints() {
     return 0
   fi
   if [[ "${#hosts[@]}" -ne "${group_count}" ]]; then
-    echo "[smoke_all_tasks] server mode requires --bind-host count to equal group count (${group_count}) when multiple hosts are provided" >&2
+    echo "[bench batch] server mode requires --bind-host count to equal group count (${group_count}) when multiple hosts are provided" >&2
     exit 2
   fi
   for (( idx=0; idx<group_count; idx++ )); do
@@ -494,178 +620,12 @@ parallel_mode_enabled() {
   [[ "${#POLICY_GPU_WORKERS[@]}" -gt 1 ]]
 }
 
-ensure_task_count_for_workers() {
-  local worker_count="$1"
-  if [[ "${#ACTIVE_TASKS[@]}" -lt "${worker_count}" ]]; then
-    echo "[smoke_all_tasks] task count (${#ACTIVE_TASKS[@]}) must be >= worker count (${worker_count}) in multi-GPU mode" >&2
-    exit 2
-  fi
-}
-
 build_parallel_assignment() {
-  local task_list_file="$1"
-  local assignment_path="$2"
-  python3 - "${env_cfg}" "${task_list_file}" "${assignment_path}" \
-    "$(IFS=,; echo "${POLICY_GPU_WORKERS[*]}")" \
-    "$(IFS=,; echo "${ENV_GPU_WORKERS[*]}")" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-RUNTIME_WEIGHTS = {
-    "imitate_sorting_sequence/arx_x5": 10596,
-    "press_by_number/arx_x5": 2955,
-    "sweep_blocks_random/arx_x5": 2392,
-    "align_blocks/arx_x5": 2013,
-    "plug_in_charger/arx_x5": 1777,
-    "fold_clothes/arx_x5": 1435,
-    "pour_by_language/arx_x5": 9448,
-    "fill_egg_holder/arx_x5": 3063,
-    "pack_objects_into_box/arx_x5": 2725,
-    "pour_balls_into_vase/arx_x5": 2509,
-    "solve_equation/arx_x5": 1867,
-    "insert_key/arx_x5": 1396,
-    "play_tic_tac_toe/arx_x5": 9323,
-    "arrange_largest_number_random/arx_x5": 3101,
-    "match_and_pick_from_conveyor/arx_x5": 2915,
-    "sort_nesting_dolls_by_size/arx_x5": 2377,
-    "stack_blocks_by_language/arx_x5": 1733,
-    "store_laptop_and_headphones/arx_x5": 1715,
-    "fasten_screws/arx_x5": 7876,
-    "make_toast_random/arx_x5": 3775,
-    "swap_blocks/arx_x5": 2941,
-    "stack_bowls/arx_x5": 1806,
-    "pour_liquid_into_cup_random/arx_x5": 1798,
-    "hang_mugs/arx_x5": 1734,
-    "general_pickup/arx_x5": 1201,
-    "play_stacking_toy/arx_x5": 5416,
-    "make_kong/arx_x5": 3818,
-    "pick_from_conveyor_by_image/arx_x5": 3150,
-    "pack_objects_into_box_random/arx_x5": 2917,
-    "play_Xylophone/arx_x5": 2174,
-    "hang_mugs_random/arx_x5": 2047,
-    "push_T_random/arx_x5": 1593,
-    "classify_objects_by_language/arx_x5": 4955,
-    "cover_blocks/arx_x5": 3837,
-    "make_toast/arx_x5": 3781,
-    "pour_liquid_into_cup/arx_x5": 2543,
-    "arrange_largest_number/arx_x5": 2346,
-    "store_laptop_and_headphones_random/arx_x5": 1981,
-    "swap_T/arx_x5": 1746,
-    "classify_objects/arx_x5": 4881,
-    "organize_table/arx_x5": 4104,
-    "store_tools_in_toolbox/arx_x5": 3783,
-    "sweep_blocks/arx_x5": 2170,
-    "fold_clothes_random/arx_x5": 1858,
-    "stack_blocks_random/arx_x5": 1768,
-    "deposit_coin/arx_x5": 1373,
-    "stack_blocks/arx_x5": 1252,
-    "build_tower/arx_x5": 4750,
-    "fill_pen_holder/arx_x5": 4698,
-    "sort_nesting_dolls_by_size_random/arx_x5": 3021,
-    "put_bottles_into_dustbin/arx_x5": 2887,
-    "insert_tubes/arx_x5": 2296,
-    "stack_bowls_random/arx_x5": 2146,
-    "push_T/arx_x5": 1311,
-}
-
-
-def score(groups: list[list[dict]]) -> tuple[int, int]:
-    loads = [sum(item["seconds"] for item in group) for group in groups]
-    return max(loads), max(loads) - min(loads)
-
-
-def partition(tasks: list[dict], group_count: int) -> list[list[dict]]:
-    groups = [[] for _ in range(group_count)]
-    loads = [0] * group_count
-    for task in tasks:
-        idx = min(range(group_count), key=lambda i: (loads[i], i))
-        groups[idx].append(task)
-        loads[idx] += task["seconds"]
-
-    while True:
-        current = score(groups)
-        loads = [sum(item["seconds"] for item in group) for group in groups]
-        src_idx = max(range(len(groups)), key=lambda i: (loads[i], i))
-        best = None
-
-        for task_idx, task in enumerate(groups[src_idx]):
-            for dst_idx in range(len(groups)):
-                if dst_idx == src_idx:
-                    continue
-                candidate = [list(group) for group in groups]
-                candidate[src_idx].pop(task_idx)
-                candidate[dst_idx].append(task)
-                candidate_score = score(candidate)
-                if candidate_score < current and (best is None or candidate_score < best[0]):
-                    best = (candidate_score, candidate)
-
-        for task_idx, task in enumerate(groups[src_idx]):
-            for dst_idx in range(len(groups)):
-                if dst_idx == src_idx:
-                    continue
-                for other_idx, other in enumerate(groups[dst_idx]):
-                    candidate = [list(group) for group in groups]
-                    candidate[src_idx][task_idx] = other
-                    candidate[dst_idx][other_idx] = task
-                    candidate_score = score(candidate)
-                    if candidate_score < current and (best is None or candidate_score < best[0]):
-                        best = (candidate_score, candidate)
-
-        if best is None:
-            break
-        groups = best[1]
-
-    for group in groups:
-        group.sort(key=lambda item: (-item["seconds"], item["task"]))
-    return groups
-
-
-env_cfg = sys.argv[1]
-task_file = Path(sys.argv[2])
-assignment_path = Path(sys.argv[3])
-policy_gpus = [item for item in sys.argv[4].split(",") if item]
-env_gpus = [item for item in sys.argv[5].split(",") if item]
-if len(policy_gpus) != len(env_gpus):
-    raise SystemExit("policy/env gpu list length mismatch")
-if not policy_gpus:
-    raise SystemExit("no gpu workers resolved")
-
-task_names = [
-    line.strip() for line in task_file.read_text(encoding="utf-8").splitlines()
-    if line.strip()
-]
-tasks = []
-missing = []
-for task_name in task_names:
-    key = f"{task_name}/{env_cfg}"
-    seconds = RUNTIME_WEIGHTS.get(key)
-    if seconds is None:
-        missing.append(key)
-        continue
-    tasks.append({"task": task_name, "key": key, "seconds": seconds})
-if missing:
-    raise SystemExit("missing runtime entries: " + ", ".join(missing))
-
-tasks.sort(key=lambda item: (-item["seconds"], item["task"]))
-groups = partition(tasks, len(policy_gpus))
-payload = {
-    "weights_source": "embedded",
-    "env_cfg": env_cfg,
-    "groups": [
-        {
-            "worker": idx,
-            "policy_gpu": policy_gpu,
-            "env_gpu": env_gpu,
-            "total_seconds": sum(item["seconds"] for item in group),
-            "tasks": group,
-        }
-        for idx, (policy_gpu, env_gpu, group) in enumerate(zip(policy_gpus, env_gpus, groups))
-    ],
-}
-assignment_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-print(json.dumps(payload, indent=2))
-PY
+  python3 "${ROOT_DIR}/scripts/internal/benchmark_groups.py" \
+    --bench "${dataset}" --env-cfg "${env_cfg}" \
+    --tasks-file "$1" --output "$2" \
+    --policy-gpu-ids "$(IFS=,; echo "${POLICY_GPU_WORKERS[*]}")" \
+    --env-gpu-ids "$(IFS=,; echo "${ENV_GPU_WORKERS[*]}")"
 }
 
 record_result_row() {
@@ -678,30 +638,13 @@ record_result_row() {
   local result_path="$7"
   local log_path="$8"
   local message="$9"
+  [[ "${target_tsv}" != "${RESULTS_TSV}" ]] || RESULTS_SAVED="false"
   if [[ ! -s "${target_tsv}" ]]; then
     printf 'status\ttask\texit_code\teval_time\telapsed_sec\tresult_path\tlog_path\tmessage\n' > "${target_tsv}"
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${status}" "${task}" "${exit_code}" "${eval_time}" "${elapsed_sec}" "${result_path}" "${log_path}" "${message}" \
     >> "${target_tsv}"
-}
-
-record_result() {
-  local status="$1"
-  local task="$2"
-  local exit_code="$3"
-  local eval_time="$4"
-  local elapsed_sec="$5"
-  local result_path="$6"
-  local log_path="$7"
-  local message="$8"
-  if [[ ! -s "${RESULTS_TSV}" ]]; then
-    printf 'status\ttask\texit_code\teval_time\telapsed_sec\tresult_path\tlog_path\tmessage\n' > "${RESULTS_TSV}"
-  fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${status}" "${task}" "${exit_code}" "${eval_time}" "${elapsed_sec}" "${result_path}" "${log_path}" "${message}" \
-    >> "${RESULTS_TSV}"
-  write_summaries
 }
 
 resolve_gpu_workers
@@ -715,18 +658,36 @@ TASKS=()
 if [[ -n "${task_output}" ]]; then
   mapfile -t TASKS <<< "${task_output}"
 fi
+episode_counts="$(python3 - "${ROOT_DIR}" "${dataset}" "${eval_num}" "${TASKS[@]}" <<'PY'
+from pathlib import Path
+import sys
+
+root, dataset, requested = sys.argv[1:4]
+sys.path.insert(0, str(Path(root) / "scripts" / "internal"))
+from benchmark_profile import expected_episode_count
+
+for task in sys.argv[4:]:
+    count = expected_episode_count(dataset, task, requested)
+    print(f"{task}\t{count}")
+PY
+)"
+declare -A TASK_EPISODES=()
+while IFS=$'\t' read -r task count; do
+  [[ -n "${task}" ]] || continue
+  TASK_EPISODES["${task}"]="${count}"
+done <<< "${episode_counts}"
 ACTIVE_TASKS=()
 for task in "${TASKS[@]}"; do
   if [[ "${resume}" == "true" ]] && passed_in_summary "${task}"; then
-    echo "[smoke_all_tasks] SKIP ${task} (already PASS in summary)"
+    echo "[bench batch] SKIP ${task} (already PASS in summary)"
     continue
   fi
   ACTIVE_TASKS+=("${task}")
 done
 
-echo "[smoke_all_tasks] tasks=${#TASKS[@]} active=${#ACTIVE_TASKS[@]} dimensions=${dimensions:-all} eval_num=${eval_num} run_id=${run_id}"
-echo "[smoke_all_tasks] summary=${summary_path}"
-echo "[smoke_all_tasks] markdown=${markdown_path}"
+echo "[bench batch] dataset=${dataset} tasks=${#TASKS[@]} active=${#ACTIVE_TASKS[@]} dimensions=${dimensions:-all} eval_num=${eval_num} run_id=${run_id}"
+echo "[bench batch] summary=${summary_path}"
+echo "[bench batch] markdown=${markdown_path}"
 
 extract_eval_time() {
   local result_path="$1"
@@ -735,8 +696,14 @@ import json
 from pathlib import Path
 import sys
 
-payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-print(int(payload.get("eval_time", 0)))
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    count = payload.get("eval_time", 0)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("eval_time must be a non-negative integer")
+except (OSError, ValueError, AttributeError) as exc:
+    raise SystemExit(f"Invalid result file {sys.argv[1]}: {exc}") from exc
+print(count)
 PY
 }
 
@@ -748,20 +715,20 @@ run_eval_for_task() {
   local task_host="${5:-}"
   local task_port="${6:-}"
   local task_run_id="${run_id}_${task}"
-  local result_path="${ROOT_DIR}/eval_result/RoboDojo/${task}/${policy_name}/${env_cfg}/${seed}_ckpt_name=${ckpt},action_type=${action_type}/${task_run_id}/_result.json"
+  local result_path="${ROOT_DIR}/eval_result/${dataset}/${task}/${policy_name}/${result_config}/${seed}_${result_info}/${task_run_id}/_result.json"
   local log_path="${log_dir}/${task}.log"
   local rc elapsed eval_time message start_sec end_sec
 
   if [[ "${execution_mode}" == "eval" ]]; then
-    echo "[smoke_all_tasks] RUN ${task} (policy_gpu=${task_policy_gpu}, env_gpu=${task_env_gpu})"
+    echo "[bench batch] RUN ${task} (policy_gpu=${task_policy_gpu}, env_gpu=${task_env_gpu})"
   else
-    echo "[smoke_all_tasks] RUN ${task} (host=${task_host}, port=${task_port}, env_gpu=${task_env_gpu})"
+    echo "[bench batch] RUN ${task} (host=${task_host}, port=${task_port}, env_gpu=${task_env_gpu})"
   fi
   start_sec="$(date +%s)"
   set +e
   if [[ "${execution_mode}" == "eval" ]]; then
     eval_cmd=(
-      bash "${ROOT_DIR}/scripts/robodojo.sh" eval
+      bash "${ROOT_DIR}/scripts/evaluate.sh" eval
       --dataset "${dataset}"
       --task "${task}"
       --ckpt "${ckpt}"
@@ -777,7 +744,7 @@ run_eval_for_task() {
     )
   else
     eval_cmd=(
-      bash "${ROOT_DIR}/scripts/robodojo.sh" client
+      bash "${ROOT_DIR}/scripts/evaluate.sh" client
       --dataset "${dataset}"
       --task "${task}"
       --env-cfg "${env_cfg}"
@@ -791,22 +758,27 @@ run_eval_for_task() {
       --connect-timeout "${connect_timeout}"
     )
   fi
-  if [[ "${eval_num}" != "native" ]]; then
-    eval_cmd+=(--eval-num "${eval_num}")
-  fi
+  eval_cmd+=(--eval-num "${eval_num}")
   if [[ "${dry_run}" == "true" ]]; then
     eval_cmd+=(--dry-run)
   fi
   ROBODOJO_RUN_ID="${task_run_id}" \
   ROBODOJO_FATAL_RESTART_COUNT=0 \
   "${eval_cmd[@]}" \
-    > "${log_path}" 2>&1
+    > "${log_path}" 2>&1 &
+  CURRENT_LAUNCH_PID=$!
+  wait "${CURRENT_LAUNCH_PID}"
   rc=$?
+  CURRENT_LAUNCH_PID=""
   set -e
   end_sec="$(date +%s)"
   elapsed=$((end_sec - start_sec))
 
   if [[ "${dry_run}" == "true" ]]; then
+    if [[ "${rc}" -ne 0 ]]; then
+      record_result_row "${target_tsv}" "FAIL" "${task}" "${rc}" "-" "${elapsed}" "${result_path}" "${log_path}" "dry-run command failed"
+      return 1
+    fi
     record_result_row "${target_tsv}" "DRY_RUN" "${task}" "${rc}" "-" "${elapsed}" "${result_path}" "${log_path}" "command rendered only"
     return 0
   fi
@@ -814,18 +786,21 @@ run_eval_for_task() {
   eval_time="-"
   message=""
   if [[ -f "${result_path}" ]]; then
-    eval_time="$(extract_eval_time "${result_path}")"
+    if ! eval_time="$(extract_eval_time "${result_path}")"; then
+      eval_time="-"
+      message="invalid _result.json"
+    fi
   else
     message="missing _result.json"
   fi
 
-  if [[ "${rc}" -eq 0 && "${eval_time}" =~ ^[0-9]+$ && "${eval_time}" -ge 1 ]]; then
+  if [[ "${rc}" -eq 0 && "${eval_time}" =~ ^[0-9]+$ && "${eval_time}" -ge "${TASK_EPISODES[${task}]}" ]]; then
     record_result_row "${target_tsv}" "PASS" "${task}" "${rc}" "${eval_time}" "${elapsed}" "${result_path}" "${log_path}" "ok"
     return 0
   fi
 
   if [[ -z "${message}" ]]; then
-    message="exit=${rc}, eval_time=${eval_time}"
+    message="exit=${rc}, eval_time=${eval_time}, expected=${TASK_EPISODES[${task}]}"
   fi
   record_result_row "${target_tsv}" "FAIL" "${task}" "${rc}" "${eval_time}" "${elapsed}" "${result_path}" "${log_path}" "${message}"
   return 1
@@ -837,15 +812,17 @@ run_server_for_group() {
   local task_host="$3"
   local task_port="$4"
   local -a server_cmd
+  # A worker must never clean up sibling workers inherited from the parent.
+  ACTIVE_WORKER_PIDS=()
 
   if [[ -z "${bootstrap_task}" ]]; then
-    echo "[smoke_all_tasks] server group has no bootstrap task" >&2
+    echo "[bench batch] server group has no bootstrap task" >&2
     return 1
   fi
 
-  echo "[smoke_all_tasks] START SERVER bootstrap_task=${bootstrap_task} policy_gpu=${task_policy_gpu} bind=${task_host}:${task_port}"
+  echo "[bench batch] START SERVER bootstrap_task=${bootstrap_task} policy_gpu=${task_policy_gpu} bind=${task_host}:${task_port}"
   server_cmd=(
-    bash "${ROOT_DIR}/scripts/robodojo.sh" server
+    bash "${ROOT_DIR}/scripts/evaluate.sh" server
     --dataset "${dataset}"
     --task "${bootstrap_task}"
     --ckpt "${ckpt}"
@@ -874,6 +851,7 @@ run_parallel_group() {
   local task_host="${7:-}"
   local task_port="${8:-}"
   local task failed="0"
+  ACTIVE_WORKER_PIDS=()
 
   while IFS= read -r task || [[ -n "${task}" ]]; do
     [[ -n "${task}" ]] || continue
@@ -895,7 +873,7 @@ run_parallel_group() {
 }
 
 run_sequential_tasks() {
-  local task
+  local task task_failed
   local task_host=""
   local task_port=""
   if [[ "${execution_mode}" == "client" ]]; then
@@ -908,32 +886,65 @@ run_sequential_tasks() {
     return $?
   fi
   for task in "${ACTIVE_TASKS[@]}"; do
+    task_failed="false"
     if ! run_eval_for_task "${task}" "${policy_gpu}" "${env_gpu}" "${RESULTS_TSV}" "${task_host}" "${task_port}"; then
-      write_summaries
-      if [[ "${fail_fast}" == "true" ]]; then
-        echo "[smoke_all_tasks] fail-fast stopping at ${task}" >&2
-        return 1
-      fi
+      task_failed="true"
     fi
     write_summaries
+    if [[ "${task_failed}" == "true" && "${fail_fast}" == "true" ]]; then
+      echo "[bench batch] fail-fast stopping at ${task}" >&2
+      return 1
+    fi
   done
+}
+
+merge_parallel_results() {
+  [[ "${BATCH_RESULTS_MERGED}" != "true" ]] || return 0
+  RESULTS_SAVED="false"
+  python3 - "${RESULTS_TSV}" "${BATCH_TASKS_FILE}" "${BATCH_META_DIR}" <<'PY' || return 1
+import csv
+from pathlib import Path
+import sys
+
+out_path = Path(sys.argv[1])
+task_order = [line.strip() for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines() if line.strip()]
+rows = []
+if out_path.exists():
+    with out_path.open(encoding="utf-8", newline="") as f:
+        rows.extend(csv.DictReader(f, delimiter="\t"))
+for path in sorted(Path(sys.argv[3]).glob("worker_*.tsv")):
+    with path.open(encoding="utf-8", newline="") as f:
+        rows.extend(csv.DictReader(f, delimiter="\t"))
+# Keep the merge idempotent, including rows restored from an earlier summary.
+rows = list({row["task"]: row for row in rows}.values())
+order = {task: idx for idx, task in enumerate(task_order)}
+rows.sort(key=lambda row: (order.get(row["task"], len(order)), row["task"]))
+fieldnames = ["status", "task", "exit_code", "eval_time", "elapsed_sec", "result_path", "log_path", "message"]
+with out_path.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(f, delimiter="\t", fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+      writer.writerow({key: row.get(key, "") for key in fieldnames})
+PY
+
+  BATCH_RESULTS_MERGED="true"
 }
 
 run_parallel_tasks() {
   local active_tasks_file assignment_path assignment_meta_dir fail_flag
-  local worker_index policy_gpu_id env_gpu_id task_file worker_tsv total_seconds
+  local worker_index policy_gpu_id env_gpu_id task_file worker_tsv group_load
   local task_host task_port bootstrap_task
-  local -a worker_pids=()
-  local -a worker_tsvs=()
 
   active_tasks_file="$(mktemp)"
   assignment_meta_dir="$(mktemp -d)"
+  BATCH_TASKS_FILE="${active_tasks_file}"
+  BATCH_META_DIR="${assignment_meta_dir}"
   assignment_path="${assignment_meta_dir}/assignment.json"
   fail_flag="${assignment_meta_dir}/fail_fast.flag"
-  trap 'rm -f "${active_tasks_file}"; rm -rf "${assignment_meta_dir}"' RETURN
 
   printf '%s\n' "${ACTIVE_TASKS[@]}" > "${active_tasks_file}"
   build_parallel_assignment "${active_tasks_file}" "${assignment_path}" > /dev/null
+  cp "${assignment_path}" "${log_dir}/../assignment.json"
   if [[ "${execution_mode}" == "client" ]]; then
     resolve_client_endpoints "${#ENV_GPU_WORKERS[@]}"
   elif [[ "${execution_mode}" == "server" ]]; then
@@ -961,7 +972,7 @@ for group in assignment["groups"]:
                 str(group["policy_gpu"]),
                 str(group["env_gpu"]),
                 str(task_file),
-                str(group["total_seconds"]),
+                group["load"],
                 ",".join(item["task"] for item in group["tasks"]),
             ]
         )
@@ -969,28 +980,32 @@ for group in assignment["groups"]:
 print("\n".join(rows))
 PY
 
-  while IFS=$'\t' read -r worker_index policy_gpu_id env_gpu_id task_file total_seconds task_names; do
+  BATCH_RESULTS_MERGED="false"
+  while IFS=$'\t' read -r worker_index policy_gpu_id env_gpu_id task_file group_load task_names; do
     [[ -n "${worker_index}" ]] || continue
+    if [[ ! -s "${task_file}" ]]; then
+      echo "[bench batch] worker=${worker_index} status=idle policy_gpu=${policy_gpu_id} env_gpu=${env_gpu_id} (no pending tasks)"
+      continue
+    fi
     worker_tsv="${assignment_meta_dir}/worker_${worker_index}.tsv"
-    worker_tsvs+=("${worker_tsv}")
     if [[ "${execution_mode}" == "client" ]]; then
       task_host="${CLIENT_HOST_WORKERS[worker_index]}"
       task_port="${CLIENT_PORT_WORKERS[worker_index]}"
-      echo "[smoke_all_tasks] group=${worker_index} host=${task_host} port=${task_port} env_gpu=${env_gpu_id} load=${total_seconds}s tasks=${task_names:-<empty>}"
+      echo "[bench batch] worker=${worker_index} status=active host=${task_host} port=${task_port} env_gpu=${env_gpu_id} load=${group_load} tasks=${task_names:-<empty>}"
       run_parallel_group "${worker_index}" "${policy_gpu_id}" "${env_gpu_id}" "${task_file}" "${worker_tsv}" "${fail_flag}" "${task_host}" "${task_port}" &
     elif [[ "${execution_mode}" == "server" ]]; then
       task_host="${SERVER_HOST_WORKERS[worker_index]}"
       task_port="${SERVER_PORT_WORKERS[worker_index]}"
       bootstrap_task="$(head -n 1 "${task_file}" | tr -d '\r')"
-      echo "[smoke_all_tasks] group=${worker_index} bootstrap_task=${bootstrap_task:-<empty>} policy_gpu=${policy_gpu_id} bind=${task_host}:${task_port} load=${total_seconds}s tasks=${task_names:-<empty>}"
+      echo "[bench batch] worker=${worker_index} status=active bootstrap_task=${bootstrap_task:-<empty>} policy_gpu=${policy_gpu_id} bind=${task_host}:${task_port} load=${group_load} tasks=${task_names:-<empty>}"
       run_server_for_group "${bootstrap_task}" "${policy_gpu_id}" "${task_host}" "${task_port}" &
     else
       task_host=""
       task_port=""
-      echo "[smoke_all_tasks] group=${worker_index} policy_gpu=${policy_gpu_id} env_gpu=${env_gpu_id} load=${total_seconds}s tasks=${task_names:-<empty>}"
+      echo "[bench batch] worker=${worker_index} status=active policy_gpu=${policy_gpu_id} env_gpu=${env_gpu_id} load=${group_load} tasks=${task_names:-<empty>}"
       run_parallel_group "${worker_index}" "${policy_gpu_id}" "${env_gpu_id}" "${task_file}" "${worker_tsv}" "${fail_flag}" "${task_host}" "${task_port}" &
     fi
-    worker_pids+=("$!")
+    ACTIVE_WORKER_PIDS+=("$!")
   done < <(
     python3 - "${assignment_path}" "${assignment_meta_dir}" <<'PY'
 import json
@@ -1008,7 +1023,7 @@ for group in assignment["groups"]:
                 str(group["policy_gpu"]),
                 str(group["env_gpu"]),
                 str(task_file),
-                str(group["total_seconds"]),
+                group["load"],
                 ",".join(item["task"] for item in group["tasks"]),
             ]
         )
@@ -1016,11 +1031,12 @@ for group in assignment["groups"]:
 PY
   )
 
-  local worker_rc overall_rc="0"
-  for pid in "${worker_pids[@]}"; do
-    if ! wait "${pid}"; then
+  local worker_index overall_rc="0"
+  for worker_index in "${!ACTIVE_WORKER_PIDS[@]}"; do
+    if ! wait "${ACTIVE_WORKER_PIDS[worker_index]}"; then
       overall_rc="1"
     fi
+    unset 'ACTIVE_WORKER_PIDS[worker_index]'
   done
 
   if [[ "${execution_mode}" == "server" ]]; then
@@ -1030,32 +1046,7 @@ PY
     return 0
   fi
 
-  python3 - "${RESULTS_TSV}" "${active_tasks_file}" "${worker_tsvs[@]}" <<'PY'
-import csv
-from pathlib import Path
-import sys
-
-out_path = Path(sys.argv[1])
-task_order = [line.strip() for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines() if line.strip()]
-rows = []
-if out_path.exists():
-    with out_path.open(encoding="utf-8", newline="") as f:
-        rows.extend(csv.DictReader(f, delimiter="\t"))
-for path_str in sys.argv[3:]:
-    path = Path(path_str)
-    if not path.exists():
-        continue
-    with path.open(encoding="utf-8", newline="") as f:
-        rows.extend(csv.DictReader(f, delimiter="\t"))
-order = {task: idx for idx, task in enumerate(task_order)}
-rows.sort(key=lambda row: (order.get(row["task"], len(order)), row["task"]))
-fieldnames = ["status", "task", "exit_code", "eval_time", "elapsed_sec", "result_path", "log_path", "message"]
-with out_path.open("w", encoding="utf-8", newline="") as f:
-    writer = csv.DictWriter(f, delimiter="\t", fieldnames=fieldnames)
-    writer.writeheader()
-    for row in rows:
-      writer.writerow({key: row.get(key, "") for key in fieldnames})
-PY
+  merge_parallel_results
 
   write_summaries
   if [[ "${overall_rc}" != "0" ]]; then
@@ -1065,30 +1056,28 @@ PY
 
 if [[ "${#ACTIVE_TASKS[@]}" -eq 0 ]]; then
   write_summaries
-  echo "[smoke_all_tasks] no tasks left to run"
+  echo "[bench batch] no tasks left to run"
   exit 0
 fi
 
 if [[ "${execution_mode}" == "server" ]]; then
-  echo "[smoke_all_tasks] mode=server workers=${#POLICY_GPU_WORKERS[@]} weights=embedded"
+  echo "[bench batch] mode=server workers=${#POLICY_GPU_WORKERS[@]}"
   if [[ "${#POLICY_GPU_WORKERS[@]}" -gt 1 ]]; then
-    ensure_task_count_for_workers "${#POLICY_GPU_WORKERS[@]}"
     run_parallel_tasks
   else
     run_sequential_tasks
   fi
 elif parallel_mode_enabled; then
-  echo "[smoke_all_tasks] mode=parallel workers=${#POLICY_GPU_WORKERS[@]} weights=embedded"
-  ensure_task_count_for_workers "${#POLICY_GPU_WORKERS[@]}"
+  echo "[bench batch] mode=parallel workers=${#POLICY_GPU_WORKERS[@]}"
   run_parallel_tasks
 else
-  echo "[smoke_all_tasks] mode=sequential policy_gpu=${policy_gpu} env_gpu=${env_gpu}"
+  echo "[bench batch] mode=sequential policy_gpu=${policy_gpu} env_gpu=${env_gpu}"
   run_sequential_tasks
 fi
 
 write_summaries
 fail_count="$(count_failures)"
-echo "[smoke_all_tasks] complete: ${summary_path}"
+echo "[bench batch] complete: ${summary_path}"
 if [[ "${fail_count}" -gt 0 ]]; then
   exit 1
 fi

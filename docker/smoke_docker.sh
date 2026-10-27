@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# End-to-end Docker procedure runner + live monitor for RoboDojo.
+# End-to-end Docker procedure runner + live monitor for RoboDojo and MiVerse.
 #
 # It drives (and asserts) the whole containerized eval loop so you can see the
 # whole procedure is working:
 #   [1] GPU is visible inside a container   (docker run --gpus all ... nvidia-smi)
 #   [2] build the robodojo image            (docker build)
 #   [3] start the demo_policy server (host, WebSocket / protocol: ws)
-#   [4] run a real container eval           (docker run ... robodojo.sh client)
-#   [5] assert eval_result/.../_result.json (eval_time >= 1)
+#   [4] run a real container eval           (docker run ... evaluate.sh client)
+#   [5] assert eval_result/.../_result.json (requested episodes completed)
 #
 # Usage:
 #   bash docker/smoke_docker.sh run        # run + monitor the whole procedure
 #   bash docker/smoke_docker.sh monitor    # attach a live view to the latest run
 #   bash docker/smoke_docker.sh clean      # stop leftover server, prune smoke logs
 #
-# Everything is overridable via env (defaults chosen to match the verified run):
+# Everything is overridable via env (task/profile default to the selected bench):
+#   ROBODOJO_SMOKE_BENCH=RoboDojo     # or MiVerse
 #   ROBODOJO_IMAGE=robodojo:cuda12.8  ROBODOJO_SMOKE_TASK=stack_bowls
 #   ROBODOJO_SMOKE_POLICY=demo_policy ROBODOJO_SMOKE_PORT=6060
 #   ROBODOJO_SMOKE_ENV_CFG=arx_x5     ROBODOJO_SMOKE_ACTION_TYPE=joint
@@ -27,12 +28,15 @@ LOG_DIR="${ROOT_DIR}/docker/smoke_logs"
 mkdir -p "${LOG_DIR}"
 
 IMAGE="${ROBODOJO_IMAGE:-robodojo:cuda12.8}"
-TASK="${ROBODOJO_SMOKE_TASK:-stack_bowls}"
+BENCH="${ROBODOJO_SMOKE_BENCH:-RoboDojo}"
+TASK="${ROBODOJO_SMOKE_TASK:-}"
 POLICY="${ROBODOJO_SMOKE_POLICY:-demo_policy}"
 PORT="${ROBODOJO_SMOKE_PORT:-6060}"
-ENV_CFG="${ROBODOJO_SMOKE_ENV_CFG:-arx_x5}"
+ENV_CFG="${ROBODOJO_SMOKE_ENV_CFG:-}"
+CONFIG_NAME=""
 ACTION_TYPE="${ROBODOJO_SMOKE_ACTION_TYPE:-joint}"
 EVAL_NUM="${ROBODOJO_SMOKE_EVAL_NUM:-1}"
+EXPECTED_EVAL_NUM=""
 CONDA_ENV="${ROBODOJO_CONDA_ENV:-RoboDojo}"
 CUDA_BASE_IMAGE="${ROBODOJO_CUDA_BASE_IMAGE:-nvidia/cuda:12.8.1-base-ubuntu22.04}"
 
@@ -108,6 +112,40 @@ fail() { put "$1" FAIL; put overall FAILED; log "${c_red}[FAIL] ${2:-$1}${c_rst}
 pass() { put "$1" PASS; log "${c_grn}[ok] $1${c_rst}"; }
 
 # ── phases ────────────────────────────────────────────────────────────────────
+phase_prepare() {
+    phase prepare "${RUN_LOG}"
+    local conda_base resolved tasks
+    conda_base="$(conda info --base 2>/dev/null || echo "${HOME}/miniconda3")"
+    # Profile parsing uses the activated policy environment, which requires
+    # PyYAML already; the host system Python does not need simulator packages.
+    # shellcheck disable=SC1091
+    source "${conda_base}/etc/profile.d/conda.sh" 2>/dev/null \
+        || fail prepare "cannot source conda from ${conda_base}"
+    conda activate "${CONDA_ENV}" 2>/dev/null || fail prepare "cannot activate conda env '${CONDA_ENV}'"
+    resolved="$(python "${ROOT_DIR}/scripts/internal/benchmark_profile.py" \
+        --bench "${BENCH}" --env-cfg "${ENV_CFG}")" \
+        || fail prepare "invalid benchmark or environment profile"
+    IFS=$'\t' read -r BENCH ENV_CFG CONFIG_NAME <<< "${resolved}"
+    if [[ -z "${TASK}" ]]; then
+        TASK="$(python "${ROOT_DIR}/scripts/internal/benchmark_profile.py" \
+            --bench "${BENCH}" --field default_task)" || fail prepare "cannot resolve default task"
+    fi
+    tasks="$(python "${ROOT_DIR}/scripts/internal/task_inventory.py" --bench "${BENCH}" --only-runnable)" \
+        || fail prepare "cannot read benchmark task inventory"
+    grep -Fxq -- "${TASK}" <<< "${tasks}" || fail prepare "unknown ${BENCH} task: ${TASK}"
+    [[ "${EVAL_NUM}" == native || "${EVAL_NUM}" =~ ^[1-9][0-9]*$ ]] \
+        || fail prepare "ROBODOJO_SMOKE_EVAL_NUM must be a positive integer or native"
+    EXPECTED_EVAL_NUM="$(python - "${ROOT_DIR}" "${BENCH}" "${TASK}" "${EVAL_NUM}" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/scripts/internal")
+from benchmark_profile import expected_episode_count
+print(expected_episode_count(*sys.argv[2:]))
+PY
+    )" || fail prepare "cannot resolve the requested episode count"
+    log "benchmark=${BENCH} task=${TASK} env_cfg=${ENV_CFG} config_name=${CONFIG_NAME}"
+    pass prepare
+}
+
 phase_gpu() {
     phase gpu_check "${RUN_LOG}"
     if dk run --rm --gpus all "${CUDA_BASE_IMAGE}" nvidia-smi >>"${RUN_LOG}" 2>&1; then
@@ -141,18 +179,11 @@ phase_build() {
 
 phase_server() {
     phase server "${SERVER_LOG}"
-    local conda_base
-    conda_base="$(conda info --base 2>/dev/null || echo "${HOME}/miniconda3")"
-    # shellcheck disable=SC1091
-    source "${conda_base}/etc/profile.d/conda.sh" 2>/dev/null \
-        || fail server "cannot source conda from ${conda_base}"
-    conda activate "${CONDA_ENV}" 2>/dev/null || fail server "cannot activate conda env '${CONDA_ENV}'"
-
     PYTHONPATH="${ROOT_DIR}:${ROOT_DIR}/XPolicyLab" \
     nohup python "${ROOT_DIR}/XPolicyLab/setup_policy_server.py" \
         --config_path "${ROOT_DIR}/XPolicyLab/policy/${POLICY}/deploy.yml" \
         --protocol ws \
-        --overrides port="${PORT}" host=127.0.0.1 dataset_name=RoboDojo \
+        --overrides port="${PORT}" host=127.0.0.1 bench_name="${BENCH}" \
             task_name="${TASK}" ckpt_name=demo env_cfg_type="${ENV_CFG}" \
             seed=0 policy_name="${POLICY}" action_type="${ACTION_TYPE}" \
         >"${SERVER_LOG}" 2>&1 &
@@ -176,7 +207,7 @@ phase_server() {
 
 phase_eval() {
     phase eval "${EVAL_LOG}"
-    log "running container eval (task=${TASK}, policy=${POLICY})"
+    log "running container eval (benchmark=${BENCH}, task=${TASK}, policy=${POLICY})"
 
     # Mount the host's Isaac Sim / Omniverse caches so Kit resolves extensions and
     # shaders locally instead of downloading them from the Omniverse registry /
@@ -214,12 +245,13 @@ phase_eval() {
     # image (Dockerfile), so nothing extra is needed here at run time.
     dk run --rm --gpus all --network host --ipc host \
         -e ROBODOJO_MAX_BASH_RETRIES=2 \
+        -e "ROBODOJO_RUN_ID=${RUN_ID}" \
         "${cache_mounts[@]}" \
         "${assets_mounts[@]}" \
         -v "${ROOT_DIR}/eval_result:/workspace/RoboDojo/eval_result" \
         "${IMAGE}" \
-        bash scripts/robodojo.sh client \
-            --task "${TASK}" --policy-name "${POLICY}" \
+        bash scripts/evaluate.sh client --bench "${BENCH}" \
+            --task "${TASK}" --env-cfg "${ENV_CFG}" --policy-name "${POLICY}" \
             --policy-host 127.0.0.1 --policy-port "${PORT}" \
             --ckpt demo --action-type "${ACTION_TYPE}" --eval-num "${EVAL_NUM}" \
         >"${EVAL_LOG}" 2>&1
@@ -234,27 +266,27 @@ phase_verify() {
     dk run --rm -v "${ROOT_DIR}/eval_result:/workspace/RoboDojo/eval_result" \
         "${IMAGE}" chown -R "$(id -u):$(id -g)" /workspace/RoboDojo/eval_result >/dev/null 2>&1 || true
 
-    local base="${ROOT_DIR}/eval_result/RoboDojo/${TASK}/${POLICY}"
-    local rj
-    rj="$(find "${base}" -name _result.json -newermt "@${RUN_START}" 2>/dev/null | sort | tail -1)"
-    [[ -n "${rj}" ]] || fail verify "no _result.json produced under ${base}"
+    local base="${ROOT_DIR}/eval_result/${BENCH}/${TASK}/${POLICY}/${CONFIG_NAME}/0_ckpt_name=demo,action_type=${ACTION_TYPE}"
+    local rj="${base}/${RUN_ID}/_result.json"
+    [[ -f "${rj}" ]] || fail verify "no _result.json produced at ${rj}"
     put result_json "${rj}"
     log "result: ${rj}"
     log "$(cat "${rj}")"
-    if python3 - "$rj" <<'PY'
-import json,sys
+    if python - "$rj" "${EXPECTED_EVAL_NUM}" <<'PY'
+import json, math, sys
 d=json.load(open(sys.argv[1]))
 et=d.get("eval_time",0)
-print(f"[verify] success_rate={d.get('success_rate')} eval_time={et} score={d.get('score')}")
-sys.exit(0 if (isinstance(et,(int,float)) and et>=1) else 1)
+expected=int(sys.argv[2])
+print(f"[verify] success_rate={d.get('success_rate')} eval_time={et}/{expected} score={d.get('score')}")
+sys.exit(0 if (type(et) in (int,float) and math.isfinite(et) and et>=expected) else 1)
 PY
-    then pass verify; else fail verify "eval_time < 1 in ${rj}"; fi
+    then pass verify; else fail verify "incomplete eval_time (expected ${EXPECTED_EVAL_NUM}) in ${rj}"; fi
 }
 
 final_report() {
     echo
-    echo "================ RoboDojo Docker procedure ================"
-    for k in gpu_check build server eval verify; do
+    echo "================ ${BENCH} Docker procedure ================"
+    for k in prepare gpu_check build server eval verify; do
         printf "  %-10s : %s\n" "$k" "$(grep "^${k}=" "${STATUS_FILE}" | tail -1 | cut -d= -f2- || echo '-')"
     done
     echo "  overall    : $(grep '^overall=' "${STATUS_FILE}" | tail -1 | cut -d= -f2-)"
@@ -263,8 +295,6 @@ final_report() {
 }
 
 cmd_run() {
-    detect_docker
-    resolve_build_args
     RUN_ID="$(stamp)"
     RUN_LOG="${LOG_DIR}/run_${RUN_ID}.log"
     BUILD_LOG="${LOG_DIR}/build_${RUN_ID}.log"
@@ -273,10 +303,11 @@ cmd_run() {
     STATUS_FILE="${LOG_DIR}/status_${RUN_ID}.txt"
     : >"${RUN_LOG}"; : >"${STATUS_FILE}"
     ln -sfn "$(basename "${STATUS_FILE}")" "${LOG_DIR}/status_latest.txt"
-    RUN_START=$(date +%s)
-
     put run_id "${RUN_ID}"; put overall RUNNING
-    log "docker mode: ${_DOCKER_MODE} | image=${IMAGE} task=${TASK} policy=${POLICY} port=${PORT} | cn_mirrors=${CN_MIRRORS}"
+    phase_prepare
+    detect_docker
+    resolve_build_args
+    log "docker mode: ${_DOCKER_MODE} | image=${IMAGE} bench=${BENCH} task=${TASK} policy=${POLICY} port=${PORT} | cn_mirrors=${CN_MIRRORS}"
 
     phase_gpu
     phase_build
@@ -299,7 +330,7 @@ cmd_monitor() {
         phase="$(grep '^phase=' "${status}" | tail -1 | cut -d= -f2-)"
         active="$(grep '^active_log=' "${status}" | tail -1 | cut -d= -f2-)"
         echo "----- [$(now)] overall=${overall:-?} phase=${phase:-?} -----"
-        for k in gpu_check build server eval verify; do
+        for k in prepare gpu_check build server eval verify; do
             printf "  %-10s %s\n" "$k" "$(grep "^${k}=" "${status}" | tail -1 | cut -d= -f2- || echo '-')"
         done
         if [[ -n "${active}" && -f "${active}" ]]; then

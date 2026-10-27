@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""List runnable RoboDojo tasks without importing Isaac-dependent task modules."""
+"""List benchmark tasks without importing Isaac-dependent task modules."""
 
 from __future__ import annotations
 
@@ -10,14 +10,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-BENCHMARK = "RoboDojo"
-TASK_DIR = ROOT_DIR / "task" / BENCHMARK / "tasks"
-CONFIG_DIR = ROOT_DIR / "task" / BENCHMARK / "config"
-
-sys.path.insert(0, str(ROOT_DIR))
-from task.RoboDojo import task_registry  # noqa: E402
-
+from benchmark_profile import BENCHMARKS, ROOT_DIR
 
 # Canonical capability groups from https://robodojo-benchmark.com/doc/sim-tasks/.
 # Generalization tasks also have runnable ``*_random`` configurations; those
@@ -98,7 +91,11 @@ def _dimension_for_task(name: str) -> str | None:
     return None
 
 
-def _parse_dimensions(values: list[str]) -> list[str]:
+def _parse_dimensions(values: list[str], bench: str = "RoboDojo") -> list[str]:
+    if bench != "RoboDojo":
+        if any(item.strip().lower() != "all" for value in values for item in value.split(",")):
+            raise ValueError(f"{bench} has no capability dimension groups; use --dimension all")
+        return []
     dimensions = []
     select_all = False
     for value in values:
@@ -132,17 +129,19 @@ def _module_classes(path: Path) -> set[str]:
     return {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
 
 
-def _task_records() -> list[dict[str, Any]]:
+def _task_records(bench: str) -> list[dict[str, Any]]:
+    task_dir = ROOT_DIR / "task" / bench / "tasks"
+    config_dir = ROOT_DIR / "task" / bench / "config"
     records = []
-    for path in sorted(TASK_DIR.glob("*.py")):
+    for path in sorted(task_dir.glob("*.py")):
         if path.name == "__init__.py":
             continue
         name = path.stem
         classes = _module_classes(path)
-        config_path = task_registry.task_config_path(CONFIG_DIR, name)
+        config_path = config_dir / f"{name}.yml"
         record = {
             "name": name,
-            "dimension": _dimension_for_task(name),
+            "dimension": _dimension_for_task(name) if bench == "RoboDojo" else None,
             "variant": "random" if name.endswith("_random") else "standard",
             "module": str(path.relative_to(ROOT_DIR)),
             "class_name": name,
@@ -165,16 +164,20 @@ def _inventory_counts(tasks: list[dict[str, Any]], config_only: list[str]) -> di
     }
 
 
-def build_inventory() -> dict[str, Any]:
-    tasks = _task_records()
+def build_inventory(bench: str = "RoboDojo") -> dict[str, Any]:
+    if bench not in BENCHMARKS:
+        raise ValueError(f"Unknown benchmark {bench!r}")
+    task_dir = ROOT_DIR / "task" / bench / "tasks"
+    config_dir = ROOT_DIR / "task" / bench / "config"
+    tasks = _task_records(bench)
     task_names = {task["name"] for task in tasks}
-    config_names = {path.stem for path in CONFIG_DIR.glob("*.yml") if not path.name.startswith("_")}
+    config_names = {path.stem for path in config_dir.glob("*.yml") if not path.name.startswith("_")}
     config_only = sorted(config_names - task_names)
     inventory = {
-        "benchmark": BENCHMARK,
+        "benchmark": bench,
         "root": str(ROOT_DIR),
-        "task_dir": str(TASK_DIR.relative_to(ROOT_DIR)),
-        "config_dir": str(CONFIG_DIR.relative_to(ROOT_DIR)),
+        "task_dir": str(task_dir.relative_to(ROOT_DIR)),
+        "config_dir": str(config_dir.relative_to(ROOT_DIR)),
         "counts": _inventory_counts(tasks, config_only),
         "tasks": tasks,
         "config_only": config_only,
@@ -245,6 +248,7 @@ def _print_dimensions(inventory: dict[str, Any], output_format: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bench", "--dataset", choices=tuple(BENCHMARKS), default="RoboDojo")
     parser.add_argument(
         "--format",
         choices=("plain", "json", "markdown"),
@@ -281,7 +285,9 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        selected_dimensions = _parse_dimensions(args.dimension)
+        selected_dimensions = _parse_dimensions(args.dimension, args.bench)
+        if args.list_dimensions and args.bench != "RoboDojo":
+            raise ValueError(f"{args.bench} has no capability dimension groups; use tasks to list all tasks")
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -289,7 +295,7 @@ def main() -> int:
         print(",".join(_normalized_dimension_names(selected_dimensions)))
         return 0
 
-    inventory = build_inventory()
+    inventory = build_inventory(args.bench)
     if args.list_dimensions:
         _print_dimensions(inventory, args.format)
     else:
@@ -309,16 +315,22 @@ def main() -> int:
             _print_plain(inventory, only_runnable=args.only_runnable)
 
     if args.check:
-        all_tasks = build_inventory()["tasks"]
-        broken = [task for task in all_tasks if not task["runnable"] or not task["dimension"]]
-        if broken:
-            for task in broken:
-                issues = []
-                if not task["runnable"]:
-                    issues.append("not runnable")
-                if not task["dimension"]:
-                    issues.append("missing capability dimension")
-                print(f"[ERROR] Task {task['name']}: {', '.join(issues)}", file=sys.stderr)
+        all_inventory = build_inventory(args.bench)
+        errors = []
+        for task in all_inventory["tasks"]:
+            issues = []
+            if not task["runnable"]:
+                issues.append("not runnable")
+            if args.bench == "RoboDojo" and not task["dimension"]:
+                issues.append("missing capability dimension")
+            if issues:
+                errors.append(f"Task {task['name']}: {', '.join(issues)}")
+        errors.extend(f"Config {name} has no task module" for name in all_inventory["config_only"])
+        if not all_inventory["tasks"]:
+            errors.append(f"No {args.bench} task modules found")
+        for error in errors:
+            print(f"[ERROR] {error}", file=sys.stderr)
+        if errors:
             return 1
     return 0
 

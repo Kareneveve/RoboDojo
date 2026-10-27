@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start an XPolicyLab policy server only (no sim client). Used by robodojo.sh server.
+# Start an XPolicyLab policy server only (no sim client). Used by evaluate.sh server.
 set -euo pipefail
 
 if [[ $# -lt 10 ]]; then
@@ -36,7 +36,7 @@ fi
 
 echo "[run_policy_server] policy_dir=${policy_dir}"
 echo "[run_policy_server] task=${task_name} bind=${policy_server_host}:${policy_server_port}"
-echo "[run_policy_server] remote clients: bash scripts/robodojo.sh client --policy-host <this_host_ip> --policy-port ${policy_server_port} ..."
+echo "[run_policy_server] remote clients: bash scripts/evaluate.sh client --bench ${bench_name} --policy-host <this_host_ip> --policy-port ${policy_server_port} ..."
 
 cd "${policy_dir}"
 exec bash setup_eval_policy_server.sh \

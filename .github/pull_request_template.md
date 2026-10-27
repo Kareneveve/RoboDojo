@@ -50,7 +50,7 @@ _Optional — keep only what applies:_
 
 - [ ] **Task:** `config/<task>.yml` + `tasks/<task>.py` present; names and labels match; meaningful `run_reward()`; inherits `TaskEnv`
 - [ ] **Env / eval client:** backward-compatible; `reset()` and `soft_reset()` cover new state
-- [ ] **Scripts / Docker:** `robodojo.sh doctor` passes; Docker PRs — `bash docker/smoke_docker.sh run`
+- [ ] **Scripts / Docker:** `bash scripts/evaluate.sh doctor --bench RoboDojo` passes; Docker PRs — `bash docker/smoke_docker.sh run`
 
 ---
 

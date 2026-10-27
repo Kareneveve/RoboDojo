@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RoboDojo eval orchestration: same contract as XPolicyLab policy eval.sh.
+# Shared eval orchestration: same contract as XPolicyLab policy eval.sh.
 set -euo pipefail
 
 if [[ $# -lt 11 ]]; then
@@ -57,37 +57,21 @@ policy_server_port="$(bash "${UTILS_DIR}/get_free_port.sh")"
 policy_server_ip="localhost"
 additional_info="ckpt_name=${ckpt_name},action_type=${action_type}"
 
-_kill_process_tree() {
-  local pid=$1
-  local sig=${2:-TERM}
-  local child
-  # Depth-first so children die before parents; covers conda/bash wrappers.
-  while read -r child; do
-    [[ -n "${child}" ]] || continue
-    _kill_process_tree "${child}" "${sig}"
-  done < <(pgrep -P "${pid}" 2>/dev/null || true)
-  kill "-${sig}" "${pid}" 2>/dev/null || true
-}
+source "$(dirname "${BASH_SOURCE[0]}")/process_utils.sh"
 
 cleanup() {
-  # Prevent re-entry from nested EXIT after INT/TERM.
-  trap '' EXIT INT TERM
-  if [[ -n "${SERVER_PID:-}" ]]; then
-    echo "[MAIN] kill server tree ${SERVER_PID}"
-    _kill_process_tree "${SERVER_PID}" TERM
-    local _i
-    for _i in 1 2 3 4 5; do
-      kill -0 "${SERVER_PID}" 2>/dev/null || {
-        SERVER_PID=""
-        return 0
-      }
-      sleep 0.2
-    done
-    _kill_process_tree "${SERVER_PID}" KILL
-    SERVER_PID=""
-  fi
+  trap - EXIT
+  trap '' INT TERM
+  local pid
+  for pid in "${WAIT_PID:-}" "${CLIENT_PID:-}" "${SERVER_PID:-}"; do
+    [[ -n "${pid}" ]] || continue
+    echo "[MAIN] stop process tree ${pid}"
+    _stop_process_tree "${pid}"
+  done
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "[MAIN] start server, policy_server_port=${policy_server_port}"
 
@@ -112,21 +96,30 @@ bash "${UTILS_DIR}/wait_for_policy_server.sh" \
   "${policy_server_port}" \
   "${SERVER_PID}" \
   "Policy server" \
-  600
+  600 &
+WAIT_PID=$!
+wait "${WAIT_PID}"
+WAIT_PID=""
 
 echo "[MAIN] start client, server=${policy_server_ip}:${policy_server_port}"
 
-bash "${CLIENT_SCRIPT}" \
-  "${bench_name}" \
-  "${task_name}" \
-  "${ckpt_name}" \
-  "${env_cfg_type}" \
-  "${action_type}" \
-  "${seed}" \
-  "${env_gpu_id}" \
-  "${eval_env_conda_env}" \
-  "${additional_info}" \
-  "${policy_server_port}" \
-  "${policy_server_ip}"
+(
+  cd "${policy_dir}"
+  exec bash "${CLIENT_SCRIPT}" \
+    "${bench_name}" \
+    "${task_name}" \
+    "${ckpt_name}" \
+    "${env_cfg_type}" \
+    "${action_type}" \
+    "${seed}" \
+    "${env_gpu_id}" \
+    "${eval_env_conda_env}" \
+    "${additional_info}" \
+    "${policy_server_port}" \
+    "${policy_server_ip}"
+) &
+CLIENT_PID=$!
+wait "${CLIENT_PID}"
+CLIENT_PID=""
 
 echo "[MAIN] eval finished"

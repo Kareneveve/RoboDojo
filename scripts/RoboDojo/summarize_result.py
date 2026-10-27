@@ -2,11 +2,12 @@
 """Aggregate RoboDojo eval results into a markdown table.
 
 Layout on disk:
-    <task>/<policy>/<embodiment>/<seed>_ckpt_name=...,action_type=.../<timestamp>/_result.json
+    <task>/<policy>/<embodiment>/<seed>_ckpt_name=...,action_type=.../<run_id>/_result.json
 
 Rules:
-  * For every (task, policy, embodiment, seed) we only read the *latest*
-    timestamp folder.
+  * For every (task, policy, embodiment, seed) we only read the most recently
+    modified `_result.json`, breaking ties by run id, then outer run label.
+    Incomplete results or invalid JSON never fall back to an older result.
   * `_result.json` -> `details` holds per-layout entries with `success` (bool)
     and `score` (float).
   * A task `X` that also has a sibling task `X_random` is a "paired" task:
@@ -102,16 +103,45 @@ def list_subdirs(path):
     )
 
 
+def result_recency_key(result_dir):
+    """Order by result-file time, with deterministic ties for custom run ids."""
+    return (
+        os.stat(os.path.join(result_dir, "_result.json")).st_mtime_ns,
+        os.path.basename(result_dir),
+        os.path.basename(os.path.dirname(result_dir)),
+    )
+
+
 def latest_timestamp_dir(run_dir):
-    """Return the latest timestamp subdir that contains a `_result.json`."""
-    candidates = []
-    for name in list_subdirs(run_dir):
-        if os.path.isfile(os.path.join(run_dir, name, "_result.json")):
-            candidates.append(name)
-    if not candidates:
-        return None
-    # Timestamp format `YYYY-MM-DD_HH-MM-SS` sorts chronologically as a string.
-    return os.path.join(run_dir, sorted(candidates)[-1])
+    """Return the subdir containing the most recently modified result file."""
+    candidates = [
+        os.path.join(run_dir, name)
+        for name in list_subdirs(run_dir)
+        if os.path.isfile(os.path.join(run_dir, name, "_result.json"))
+    ]
+    return max(candidates, key=result_recency_key, default=None)
+
+
+def latest_task_result_dirs(task):
+    """Select result paths before checking JSON or episode completeness."""
+    task_path = os.path.join(ROOT, task)
+    selected = {}
+    for policy in list_subdirs(task_path):
+        policy_path = os.path.join(task_path, policy)
+        for embodiment in list_subdirs(policy_path):
+            emb_path = os.path.join(policy_path, embodiment)
+            for run in list_subdirs(emb_path):
+                match = SEED_RE.match(run)
+                if not match:
+                    continue
+                result_dir = latest_timestamp_dir(os.path.join(emb_path, run))
+                if result_dir is None:
+                    continue
+                key = (policy, embodiment, int(match.group(1)))
+                previous = selected.get(key)
+                if previous is None or result_recency_key(result_dir) > result_recency_key(previous):
+                    selected[key] = result_dir
+    return selected
 
 
 def result_record_ids(ts_dir):
@@ -161,50 +191,28 @@ def collect_result_video_checks(random_of):
     """Check only timestamp folders whose results are included in the summary."""
     random_tasks = set(random_of.values())
     summary_tasks = list(ALL_TASKS) + sorted(random_tasks)
-    selected = {}
+    selected = []
     for task in summary_tasks:
         required_episodes = (
             PAIRED_HALF_EPISODES
             if is_paired_task(task, random_of) or task in random_tasks
             else STANDALONE_EPISODES
         )
-        task_path = os.path.join(ROOT, task)
-        for policy in list_subdirs(task_path):
-            policy_path = os.path.join(task_path, policy)
-            for embodiment in list_subdirs(policy_path):
-                emb_path = os.path.join(policy_path, embodiment)
-                for run in list_subdirs(emb_path):
-                    seed_match = SEED_RE.match(run)
-                    if not seed_match:
-                        continue
-                    ts_dir = latest_timestamp_dir(os.path.join(emb_path, run))
-                    if ts_dir is None:
-                        continue
-                    entries = load_entries(ts_dir)
-                    if entries is None:
-                        continue
-                    seed = int(seed_match.group(1))
-                    key = (task, policy, embodiment, seed)
-                    timestamp = os.path.basename(ts_dir)
-                    previous = selected.get(key)
-                    if previous is None or timestamp > previous["timestamp"]:
-                        selected[key] = {
-                            "task": task,
-                            "policy": policy,
-                            "embodiment": embodiment,
-                            "run": run,
-                            "timestamp": timestamp,
-                            "ts_dir": ts_dir,
-                            "required_episodes": required_episodes,
-                            "entry_count": len(entries),
-                        }
+        for (policy, embodiment, _seed), ts_dir in latest_task_result_dirs(task).items():
+            entries = load_entries(ts_dir)
+            if entries is None or len(entries) < required_episodes:
+                continue
+            selected.append({
+                "task": task,
+                "policy": policy,
+                "embodiment": embodiment,
+                "run": os.path.basename(os.path.dirname(ts_dir)),
+                "timestamp": os.path.basename(ts_dir),
+                "ts_dir": ts_dir,
+            })
 
     checks = []
-    for selected_result in selected.values():
-        if selected_result.pop("entry_count") < selected_result.pop(
-            "required_episodes"
-        ):
-            continue
+    for selected_result in selected:
         ts_dir = selected_result.pop("ts_dir")
         record_ids = result_record_ids(ts_dir)
         cameras_by_episode, file_count = video_inventory(ts_dir)
@@ -266,29 +274,11 @@ def load_entries(ts_dir):
 
 def scan_task(task):
     """Return {(policy, embodiment, seed): [(success, score), ...]} for a task."""
-    task_path = os.path.join(ROOT, task)
     out = {}
-    latest_ts = {}
-    for policy in list_subdirs(task_path):
-        policy_path = os.path.join(task_path, policy)
-        for embodiment in list_subdirs(policy_path):
-            emb_path = os.path.join(policy_path, embodiment)
-            for run in list_subdirs(emb_path):
-                m = SEED_RE.match(run)
-                if not m:
-                    continue
-                seed = int(m.group(1))
-                ts_dir = latest_timestamp_dir(os.path.join(emb_path, run))
-                if ts_dir is None:
-                    continue
-                ts_name = os.path.basename(ts_dir)
-                entries = load_entries(ts_dir)
-                if entries is None:
-                    continue
-                key = (policy, embodiment, seed)
-                if key not in out or ts_name > latest_ts[key]:
-                    out[key] = entries
-                    latest_ts[key] = ts_name
+    for key, ts_dir in latest_task_result_dirs(task).items():
+        entries = load_entries(ts_dir)
+        if entries is not None:
+            out[key] = entries
     return out
 
 

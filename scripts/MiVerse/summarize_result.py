@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Summarize MiVerse clean, language (_l), and spatial (_s) evaluations.
 
-Read the latest result for each (task, policy, eval config, seed), using only
+Read the most recently modified result for each (task, policy, eval config, seed), using only
 25 completed episodes in numeric ``details`` key order. Eval configs under one
 policy are collapsed the same way RoboDojo drops embodiment: one table per
 policy. When several configs have the same task and seed, configs are walked
@@ -15,15 +15,19 @@ Input: <root>/<task>/<policy>/<config>/<seed>_<run>/<timestamp>/_result.json
 Output: <root>/_summary.md. Set MIVERSE_EVAL_ROOT to override the default root.
 """
 
-from datetime import datetime
+import argparse
 import json
 import math
 import os
 import re
 import statistics
+import sys
 import warnings
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.normpath(os.path.join(SCRIPT_DIR, "..", "..")))
+from env.benchmark import decode_result_info
+
 ROOT = os.environ.get(
     "MIVERSE_EVAL_ROOT",
     os.path.normpath(os.path.join(SCRIPT_DIR, "..", "..", "eval_result", "MiVerse")),
@@ -44,10 +48,6 @@ TASKS = [
     "sweep_paper_ball_into_dustbin",
 ]
 TOTAL_REQUIRED = len(TASKS) * len(EXPECTED_SEEDS)
-TIMESTAMP_FORMATS = [
-    (re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}"), "%Y-%m-%d_%H-%M-%S"),
-    (re.compile(r"\d{8}_\d{6}"), "%Y%m%d_%H%M%S"),
-]
 
 
 def list_subdirs(path):
@@ -60,16 +60,12 @@ def list_subdirs(path):
 
 
 def timestamp_key(ts_dir):
-    """Compare both supported timestamp formats, including prefixed run names."""
-    name = os.path.basename(ts_dir)
-    for pattern, fmt in TIMESTAMP_FORMATS:
-        match = pattern.search(name)
-        if match:
-            try:
-                return datetime.strptime(match.group(), fmt).timestamp(), ts_dir
-            except ValueError:
-                pass
-    return os.path.getmtime(os.path.join(ts_dir, "_result.json")), ts_dir
+    """Order by result modification time, including arbitrary --run-id names."""
+    return (
+        os.stat(os.path.join(ts_dir, "_result.json")).st_mtime_ns,
+        os.path.basename(ts_dir),
+        os.path.basename(os.path.dirname(ts_dir)),
+    )
 
 
 def latest_timestamp_dir(run_dir):
@@ -86,40 +82,47 @@ def load_entries(ts_dir):
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("result must be a mapping")
         details = data["details"]
         if not isinstance(details, dict):
             raise ValueError("details must be a mapping")
         indexed = []
         for key, entry in details.items():
-            try:
-                index = int(key)
-            except (TypeError, ValueError):
-                continue
-            if index >= 0:
-                indexed.append((index, entry))
+            if not re.fullmatch(r"\d+", key):
+                raise ValueError(f"invalid episode index {key!r}")
+            indexed.append((int(key), entry))
         indexed.sort(key=lambda item: item[0])
         if len({index for index, _ in indexed}) != len(indexed):
             raise ValueError("duplicate episode indices")
+        selected = indexed[:EPISODES]
+        if [index for index, _ in selected] != list(range(len(selected))):
+            raise ValueError("episode indices must be contiguous and start at 0")
         entries = []
-        for _, entry in indexed[:EPISODES]:
+        for _, entry in selected:
+            if not isinstance(entry, dict):
+                raise ValueError("episode record must be a mapping")
             success = entry["success"]
-            score = float(entry["score"])
-            if not isinstance(success, bool) or not math.isfinite(score) or not 0 <= score <= 1:
+            score = entry["score"]
+            if (type(success) is not bool or type(score) not in (int, float)
+                    or not 0 <= score <= 1 or not math.isfinite(score)):
                 raise ValueError("success must be bool and score must be in [0, 1]")
-            entries.append((success, score))
+            entries.append((success, float(score)))
         return entries
     except (OSError, ValueError, TypeError, KeyError) as exc:
         warnings.warn(f"Skipping invalid result {path}: {exc}", stacklevel=2)
         return None
 
 
-def scan_task(task, root=None):
+def scan_task(task, root=None, ckpt=None, action_type=None, env_cfg=None):
     """Return latest entries by (policy, config, seed), without mixing configs."""
     task_path = os.path.join(ROOT if root is None else root, task)
     latest = {}
     for policy in list_subdirs(task_path):
         policy_path = os.path.join(task_path, policy)
         for config in list_subdirs(policy_path):
+            if env_cfg is not None and config != env_cfg:
+                continue
             config_path = os.path.join(policy_path, config)
             for run in list_subdirs(config_path):
                 match = SEED_RE.match(run)
@@ -128,6 +131,23 @@ def scan_task(task, root=None):
                 ts_dir = latest_timestamp_dir(os.path.join(config_path, run))
                 if ts_dir is None:
                     continue
+                if ckpt is not None or action_type is not None:
+                    result_path = os.path.join(ts_dir, "_result.json")
+                    try:
+                        run_info = decode_result_info(run[match.end():], result_path)
+                    except (OSError, ValueError) as exc:
+                        warnings.warn(f"Skipping invalid result label {result_path}: {exc}", stacklevel=2)
+                        continue
+                    metadata = dict(item.split("=", 1) for item in run_info.split(",") if "=" in item)
+                    # The checkpoint itself may contain commas and equals signs.
+                    checkpoint_info, action_marker, saved_action = run_info.rpartition(",action_type=")
+                    if action_marker and checkpoint_info.startswith("ckpt_name="):
+                        metadata = {"ckpt_name": checkpoint_info[len("ckpt_name="):],
+                                    "action_type": saved_action}
+                    if ckpt is not None and metadata.get("ckpt_name") != ckpt:
+                        continue
+                    if action_type is not None and metadata.get("action_type") != action_type:
+                        continue
                 key = (policy, config, int(match.group(1)))
                 if key not in latest or timestamp_key(ts_dir) > timestamp_key(latest[key]):
                     latest[key] = ts_dir
@@ -144,7 +164,7 @@ def stats(entries):
             sum(score for _, score in entries) / count * 100)
 
 
-def collect_data(root=None):
+def collect_data(root=None, ckpt=None, action_type=None, env_cfg=None):
     """data[policy][dimension][base_task][seed] = (SR, Score).
 
     Config directories stay separate while picking the latest run, then fold
@@ -154,7 +174,7 @@ def collect_data(root=None):
     data = {}
     for dimension, suffix in DIMENSIONS.items():
         for task in TASKS:
-            scanned = scan_task(task + suffix, root)
+            scanned = scan_task(task + suffix, root, ckpt, action_type, env_cfg)
             for policy, _config, seed in sorted(scanned):
                 entries = scanned[(policy, _config, seed)]
                 dimension_data = data.setdefault(policy, {}).setdefault(dimension, {})
@@ -324,7 +344,7 @@ def write_markdown(data, output_path=None):
         "- Dimensions: **clean** = original task; **language** = `_l`; **spatial** = `_s`.",
         f"- Each task/seed uses only the first **{EPISODES}** completed episodes, "
         "sorted by the numeric `details` key, not `layout_id`. Later episodes are ignored.",
-        f"- Use the latest result per task/policy/eval config/seed, then keep one "
+        f"- Use the most recently modified `_result.json` per task/policy/eval config/seed, then keep one "
         f"result per policy. Configs are taken in sorted order; a complete result "
         f"replaces an earlier config, and fewer than {EPISODES} episodes does not. "
         "No fallback to an older run inside the same config.",
@@ -354,23 +374,41 @@ def write_markdown(data, output_path=None):
             rows = [format_task_row(task + suffix, dimension_data.get(task, {})) for task in TASKS]
             rows.append(format_avg_row(dimension_data))
             append_table(lines, header, rows)
-    with open(OUTPUT_MD if output_path is None else output_path, "w", encoding="utf-8") as fh:
+    output_path = OUTPUT_MD if output_path is None else output_path
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
 
-def main():
-    if not os.path.isdir(ROOT):
+def main(root=None, output=None, ckpt=None, action_type=None, env_cfg=None):
+    root = ROOT if root is None else root
+    output = os.path.join(root, "_summary.md") if output is None else output
+    if not os.path.isdir(root):
         raise SystemExit(
-            f"Eval result directory not found: {ROOT}\n"
-            "Set MIVERSE_EVAL_ROOT or run with eval_result/MiVerse present."
+            f"Eval result directory not found: {root}\n"
+            "Use --root, set MIVERSE_EVAL_ROOT, or run with eval_result/MiVerse present."
         )
-    data = collect_data()
-    write_markdown(data)
+    data = collect_data(root, ckpt, action_type, env_cfg)
+    write_markdown(data, output)
     filled = sum(policy_progress(tasks)[0] for dims in data.values() for tasks in dims.values())
     complete = sum(policy_is_complete(tasks) for dims in data.values() for tasks in dims.values())
     print(f"Wrote {len(data)} policies, {filled} completed task/seed cells, "
-          f"{complete} complete dimensions to {OUTPUT_MD}")
+          f"{complete} complete dimensions to {output}")
+
+
+def cli(argv=None):
+    parser = argparse.ArgumentParser(description="Summarize completed MiVerse evaluation results.")
+    parser.add_argument("--dataset", choices=("MiVerse",), default="MiVerse", help=argparse.SUPPRESS)
+    parser.add_argument("--root", help="Result root; defaults to MIVERSE_EVAL_ROOT or eval_result/MiVerse.")
+    parser.add_argument("--output", help="Markdown output path (default: <root>/_summary.md).")
+    parser.add_argument("--ckpt", help="Only include this exact original checkpoint name or path.")
+    parser.add_argument("--action-type", help="Only include this exact action_type.")
+    parser.add_argument("--env-cfg", help="Only include this saved result config_name (e.g. miverse).")
+    args = parser.parse_args(argv)
+    root = os.path.abspath(os.path.expanduser(args.root or os.environ.get("MIVERSE_EVAL_ROOT", ROOT)))
+    output = os.path.abspath(os.path.expanduser(args.output or os.path.join(root, "_summary.md")))
+    main(root, output, args.ckpt, args.action_type, args.env_cfg)
 
 
 if __name__ == "__main__":
-    main()
+    cli()

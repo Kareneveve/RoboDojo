@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
-# RoboDojo simulator / evaluation image (Ubuntu 22.04 + CUDA 12.8).
+# RoboDojo / MiVerse simulator evaluation image (Ubuntu 22.04 + CUDA 12.8).
 #
 # Scope: this image contains ONLY the RoboDojo simulation-evaluation side
 # (Isaac Sim, IsaacLab, CuRobo, the RoboDojo Python stack) plus the lightweight
 # XPolicyLab client_server + policy deploy adapters used by src/eval_client.
 # It deliberately does NOT install any policy-specific environment, dependency
-# set, or checkpoints (e.g. GR00T_N17). The policy server runs OUTSIDE this
+# set, or checkpoints. The policy server runs OUTSIDE this
 # container and is reached over TCP (see docker/README.md).
 #
 # Build:
@@ -16,8 +16,9 @@
 #     -v "$PWD/Assets:/workspace/RoboDojo/Assets:ro" \
 #     -v "$PWD/eval_result:/workspace/RoboDojo/eval_result" \
 #     robodojo:cuda12.8 \
-#     bash scripts/robodojo.sh client --task stack_bowls \
-#       --policy-name GR00T_N17 --policy-host 127.0.0.1 --policy-port 9999 --eval-num 1
+#     bash scripts/evaluate.sh client --bench RoboDojo --task stack_bowls \
+#       --policy-name demo_policy --ckpt demo --action-type joint \
+#       --policy-host 127.0.0.1 --policy-port 9999 --eval-num 1
 
 ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
 FROM ${CUDA_IMAGE}
@@ -180,8 +181,8 @@ RUN python -m pip install \
 
 # ── RoboDojo source + XPolicyLab client/adapter code ─────────────────────────
 # Explicit copies (not `COPY .`) so we do not clobber the compiled artifacts
-# already built under third_party/. Heavy policy source, weights, checkpoints,
-# assets, and runtime outputs are excluded via .dockerignore.
+# already built under third_party/. Weights, checkpoints, assets, and runtime
+# outputs are excluded via .dockerignore; policy environments are not installed.
 COPY env/ /workspace/RoboDojo/env/
 COPY env_cfg/ /workspace/RoboDojo/env_cfg/
 COPY task/ /workspace/RoboDojo/task/
@@ -190,6 +191,10 @@ COPY utils/ /workspace/RoboDojo/utils/
 COPY scripts/ /workspace/RoboDojo/scripts/
 COPY XPolicyLab/ /workspace/RoboDojo/XPolicyLab/
 COPY pyproject.toml README.md LICENSE /workspace/RoboDojo/
+
+# main.py preloads Pinocchio before Kit; use the same compatible stack as the
+# native installer, including MiVerse's Pink IK dependencies.
+RUN bash scripts/install.sh --from pink
 
 # ── Strip broken submodule .git pointers ─────────────────────────────────────
 # Vendored submodules are copied with their `.git` files (a submodule `.git` is a

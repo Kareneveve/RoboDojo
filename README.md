@@ -8,6 +8,29 @@
 
 </div>
 
+## This fork: RoboDojo + MiVerse
+
+This repository builds on RoboDojo and adds **MiVerse as a separate benchmark**.
+The original RoboDojo tasks, configurations, and scoring semantics are preserved;
+MiVerse adds 24 mobile manipulation tasks using the shared simulation stack:
+eight base tasks and their `_l` (language) and `_s` (spatial) variants.
+
+Both benchmarks use `bash scripts/evaluate.sh <command> --bench <NAME>`:
+
+- **MiVerse:** pass `--bench MiVerse`; see the [MiVerse guide](scripts/MiVerse/README.md).
+- **RoboDojo:** pass `--bench RoboDojo` (the default); see the [CLI guide](scripts/README.md) and [official documentation](https://robodojo-benchmark.com/doc/).
+
+Task discovery, environment checks, single-task launch, and batch scheduling are
+shared. Benchmark-specific task definitions and scoring remain separate.
+`scripts/MiVerse/miverse.sh` remains a compatibility alias for MiVerse.
+
+This fork uses the recorded [XPolicyLab submodule](XPolicyLab) for policy
+integration; see its [README](XPolicyLab/README.md) for the adapters
+included here. The RoboDojo overview, news, leaderboard, and citations below
+refer to the original benchmark. For this fork, start with the
+[quick start](#miverse-quick-start) and [shared CLI guide](scripts/README.md);
+upstream policy counts and examples describe the broader upstream project.
+
 https://private-user-images.githubusercontent.com/88101805/619409345-cc074c5d-4567-4418-8a29-1385aaba9d5b.mp4
 
 ## News
@@ -38,7 +61,8 @@ https://private-user-images.githubusercontent.com/88101805/619409345-cc074c5d-45
 
 ## 📚 Documentation
 
-The [RoboDojo documentation](https://robodojo-benchmark.com/doc/) is the canonical reference. Key sections:
+For the added benchmark, see the [MiVerse guide](scripts/MiVerse/README.md).
+The [RoboDojo documentation](https://robodojo-benchmark.com/doc/) remains the canonical reference for the original RoboDojo benchmark. Key sections:
 
 | Section | Description |
 | :-- | :-- |
@@ -51,28 +75,125 @@ The [RoboDojo documentation](https://robodojo-benchmark.com/doc/) is the canonic
 | [Configurations](https://robodojo-benchmark.com/doc/usage/configurations/) | Simulator, scene, robot, and camera configuration options. |
 | [Common Issues](https://robodojo-benchmark.com/doc/common-issue/) | Troubleshooting for installation, assets, GPU memory, and evaluation. |
 
+## MiVerse quick start
+
+The simulator installer targets **Linux x86_64**, an NVIDIA GPU, and Python 3.11.
+Run these commands from the repository root. Policy dependencies are installed
+separately from the simulator environment.
+
+```bash
+git clone https://github.com/ZixuanLi2004/RoboDojo.git
+cd RoboDojo
+git submodule update --init --recursive
+bash scripts/install.sh --install
+conda activate RoboDojo
+bash scripts/init_assets.sh --bench MiVerse
+```
+
+`init_assets.sh --bench MiVerse` downloads MiVerse objects, rooms, robots, and
+saved layouts together with shared assets. To prepare both benchmarks, use the
+default `bash scripts/init_assets.sh` (equivalent to `--bench all`); use
+`--bench RoboDojo` for RoboDojo alone. Both use the same Hugging Face asset
+source, configured through `HF_REPO_ID`, `HF_REPO_URL`, and `HF_REVISION`.
+The selected revision must contain the requested benchmark's assets; missing
+packages cause an error. These assets are not bundled with this checkout.
+See the [asset options](scripts/README.md#download-assets) and the
+[MiVerse asset layout](scripts/MiVerse/README.md#installation-and-assets).
+
+Prepare the included weight-free demo policy, then check one task and preview
+its launch:
+
+```bash
+conda create -n demo-policy python=3.11 -y
+conda activate demo-policy
+bash XPolicyLab/policy/demo_policy/install.sh
+conda activate RoboDojo
+
+bash scripts/evaluate.sh tasks --bench MiVerse --check
+bash scripts/evaluate.sh doctor --bench MiVerse \
+  --task place_kettle_on_tv_stand --seed 0 --eval-num 1 \
+  --policy-dir XPolicyLab/policy/demo_policy --policy-env demo-policy
+bash scripts/evaluate.sh eval --bench MiVerse \
+  --policy-dir XPolicyLab/policy/demo_policy \
+  --task place_kettle_on_tv_stand --ckpt demo --policy-env demo-policy \
+  --action-type joint --seed 0 --eval-num 1 --dry-run
+```
+
+After the required assets and environments are ready, remove `--dry-run` for
+an actual one-episode interface check. `demo_policy` holds the observed posture
+and commands zero base velocity; it does not solve the task or load a checkpoint.
+For learned policies, install the selected adapter's dependencies and supply a
+compatible checkpoint. The [policy compatibility list](scripts/MiVerse/README.md#policy-and-action-compatibility)
+specifies which adapters require `joint` or `ee`; the CLI default is `ee`.
+
+Selecting `--bench MiVerse` sets the default environment profile to
+`miverse` (`env_cfg/miverse.yml`), with `config_name: miverse` for layouts and
+results. Results are written under
+`eval_result/MiVerse/<task>/<policy>/miverse/`. Use the
+[MiVerse guide](scripts/MiVerse/README.md) for multi-GPU evaluation, split
+server/client commands, resume, and the full 24-task × 3-seed summary.
+Each task requires 25 episodes per seed. Summary reports group the base tasks,
+`_l` variants, and `_s` variants into clean, language, and spatial dimensions.
+MiVerse supports every evaluation command; RoboDojo capability `dimensions`
+do not apply to its tasks. For the original benchmark, follow the
+[RoboDojo CLI guide](scripts/README.md).
+
+### Checks without simulation
+
+With Python 3.11+, PyYAML, NumPy, and Bash 4+ available:
+
+```bash
+bash scripts/evaluate.sh tasks --bench RoboDojo --check
+bash scripts/evaluate.sh tasks --bench MiVerse --check
+bash -n scripts/evaluate.sh scripts/eval_policy.sh
+```
+
+These checks validate task inventories and shell syntax. They do not start
+Isaac Sim or load learned policy weights. GPU simulation, asset loading, Pink
+IK execution, and real checkpoint inference require validation on a configured
+Linux evaluation machine. A successful dry run or doctor check alone does not
+establish that runtime validation.
+
 ## 🗂️ Repository Structure
 
 ```text
 env/                   simulator backbone and managers
 env_cfg/               simulator, scene, robot, and camera configs
-task/RoboDojo/         task logic and task YAML configs
-scripts/robodojo.sh    public RoboDojo-side eval entry
-scripts/eval_policy.sh simulator client launched by XPolicyLab eval.sh
+task/RoboDojo/         original RoboDojo tasks and task YAML configs
+task/MiVerse/          24 mobile manipulation tasks and configs (8 base + 16 variants)
+src/eval_client/       shared simulator client
+scripts/evaluate.sh    shared CLI; select RoboDojo or MiVerse with --bench
+scripts/internal/      shared task discovery, validation, launch, and batching
+scripts/RoboDojo/      RoboDojo scoring and download helpers
+scripts/MiVerse/       MiVerse scoring, guide, and compatibility CLI alias
+scripts/eval_policy.sh shared simulator client entry
 XPolicyLab/            policy server and policy integrations
-Assets/                downloaded robot, object, material, and layout assets
+Assets/                downloaded robot, object, room, material, and layout assets
 ```
+
+`evaluate.sh summarize --bench RoboDojo|MiVerse` selects the summary script in
+the matching benchmark folder and writes `eval_result/<benchmark>/_summary.md`
+by default. Each benchmark retains its own scoring and completeness rules.
 
 ## 🔌 Policy Integration
 
-Policies live in [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab/blob/main/README.md), which owns policy structure, dependencies, checkpoint layout, and server behavior. RoboDojo only assumes a policy directory provides:
+Policies live in the [XPolicyLab submodule](XPolicyLab/README.md), which owns policy structure, dependencies, checkpoint layout, and server behavior. The shared evaluation path uses these policy-side files:
 
 ```text
 XPolicyLab/policy/<POLICY_NAME>/eval.sh
+XPolicyLab/policy/<POLICY_NAME>/setup_eval_policy_server.sh
+XPolicyLab/policy/<POLICY_NAME>/setup_eval_env_client.sh
+XPolicyLab/policy/<POLICY_NAME>/deploy.py
 XPolicyLab/policy/<POLICY_NAME>/deploy.yml
 ```
 
-`eval.sh` starts the policy server and calls back into RoboDojo through `scripts/eval_policy.sh`; `deploy.yml` declares the server host, port, action mode, and policy-specific runtime settings.
+`evaluate.sh eval` requires `eval.sh` for validation but launches the two setup
+scripts directly for either benchmark. The selected benchmark determines task
+lookup, the default environment profile, and result paths. The client setup
+calls `scripts/eval_policy.sh`; `deploy.py`
+provides the environment-side adapter, and `deploy.yml` declares transport,
+batching, and policy-specific runtime settings. A policy's `eval.sh` is also
+available as a direct policy-side entry point.
 
 ## 🏆 Leaderboard
 
