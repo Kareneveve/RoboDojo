@@ -7,7 +7,7 @@ common:
   camera_config: "m92uw_nav_ui"
   render_interval: 2
   robot_self_collision: false
-  eval_nums: 50
+  eval_nums: 25
 
 tasks:
   place_kettle_on_tv_stand:
@@ -15,22 +15,18 @@ tasks:
 
   place_kettle_on_tv_stand_l:
     scene_config: miverse_livingroom_notv
-    eval_nums: 25
 
   place_kettle_on_tv_stand_s:
     scene_config: miverse_livingroom_notv
-    eval_nums: 25
 
   place_fruit_basket:
     scene_config: miverse_livingroom_notv
 
   place_fruit_basket_l:
     scene_config: miverse_livingroom_notv
-    eval_nums: 25
 
   place_fruit_basket_s:
     scene_config: miverse_livingroom_notv
-    eval_nums: 25
 
   throw_away_trash:
     device: cpu
@@ -39,52 +35,40 @@ tasks:
   throw_away_trash_l:
     device: cpu
     scene_config: miverse_livingroom1
-    eval_nums: 25
 
   throw_away_trash_s:
     device: cpu
     scene_config: miverse_livingroom1
-    eval_nums: 25
 
   put_object_in_sink: {}
 
-  put_object_in_sink_l:
-    eval_nums: 25
+  put_object_in_sink_l: {}
 
-  put_object_in_sink_s:
-    eval_nums: 25
+  put_object_in_sink_s: {}
 
   distribute_bowls_to_plates: {}
 
-  distribute_bowls_to_plates_l:
-    eval_nums: 25
+  distribute_bowls_to_plates_l: {}
 
-  distribute_bowls_to_plates_s:
-    eval_nums: 25
+  distribute_bowls_to_plates_s: {}
 
   place_objects_in_dishwasher: {}
 
-  place_objects_in_dishwasher_l:
-    eval_nums: 25
+  place_objects_in_dishwasher_l: {}
 
-  place_objects_in_dishwasher_s:
-    eval_nums: 25
+  place_objects_in_dishwasher_s: {}
 
   place_bread_in_oven: {}
 
-  place_bread_in_oven_l:
-    eval_nums: 25
+  place_bread_in_oven_l: {}
 
-  place_bread_in_oven_s:
-    eval_nums: 25
+  place_bread_in_oven_s: {}
 
   sweep_paper_ball_into_dustbin:
     scene_config: miverse_livingroom1
 
   sweep_paper_ball_into_dustbin_l:
     scene_config: miverse_livingroom1
-    eval_nums: 25
 
   sweep_paper_ball_into_dustbin_s:
     scene_config: miverse_livingroom1
-    eval_nums: 25

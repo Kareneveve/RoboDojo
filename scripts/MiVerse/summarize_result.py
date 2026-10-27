@@ -1,37 +1,27 @@
 #!/usr/bin/env python3
-"""Aggregate MiVerse eval results into a markdown table.
+"""Summarize MiVerse clean, language (_l), and spatial (_s) evaluations.
 
-Layout on disk:
-    <task>/<policy>/<embodiment>/<seed>_ckpt_name=...,action_type=.../<timestamp>/_result.json
+Read the latest result for each (task, policy, eval config, seed), using only
+25 completed episodes in numeric ``details`` key order. Eval configs under one
+policy are collapsed the same way RoboDojo drops embodiment: one table per
+policy. When several configs have the same task and seed, configs are walked
+in sorted order and a complete result replaces the earlier one. An incomplete
+latest run does not replace a completed result from another config. A
+task/seed cell needs all 25 entries. Tasks and the three seed averages have
+equal weight. Missing seeds leave the three-seed average blank; partial task
+coverage is marked with a dagger.
 
-Rules:
-  * MiVerse has 8 tasks. There are no capability dimensions and no
-    ``*_random`` splits; each task is scored on its own.
-  * Configurations and run labels (including checkpoint and action type) are
-    separate experiments. For every (task, experiment, seed) we only read the
-    *latest* timestamp folder; an incomplete or invalid latest result never
-    falls back to an older completed result.
-  * `_result.json` -> `details` holds per-episode entries with `success` (bool)
-    and `score` (float in [0, 1]).
-  * A cell is filled only when the first 50 episodes are present; otherwise
-    the cell stays blank.
-  * Each policy table lists seeds 0, 1, 2.
-  * The overview lists every policy with at least one completed (task, seed)
-    cell. Progress = completed cells / 24 (8 tasks x 3 seeds).
-  * Avg SR and Avg Score are the unweighted mean of the 8 tasks. Across seeds
-    they are reported as mean ±std. Incomplete policies use the tasks finished
-    so far and are marked with dagger in Progress.
-  * success_rate = successes / count * 100
-    score        = sum(scores) / count * 100
+Input: <root>/<task>/<policy>/<config>/<seed>_<run>/<timestamp>/_result.json
+Output: <root>/_summary.md. Set MIVERSE_EVAL_ROOT to override the default root.
 """
 
-import argparse
-import html
+from datetime import datetime
 import json
+import math
 import os
 import re
 import statistics
-import sys
+import warnings
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.environ.get(
@@ -39,36 +29,25 @@ ROOT = os.environ.get(
     os.path.normpath(os.path.join(SCRIPT_DIR, "..", "..", "eval_result", "MiVerse")),
 )
 OUTPUT_MD = os.path.join(ROOT, "_summary.md")
-
 SEED_RE = re.compile(r"^(\d+)_")
+EPISODES = 25
 EXPECTED_SEEDS = [0, 1, 2]
-TASKS = []
-TASK_EPISODES = {}
-TOTAL_REQUIRED = 0
-
-
-def load_task_spec():
-    """Use the same task inventory and native episode counts as evaluation."""
-    import yaml
-
-    path = os.path.join(SCRIPT_DIR, "..", "..", "task", "MiVerse", "config", "_task.yml")
-    with open(path, encoding="utf-8") as fh:
-        config = yaml.safe_load(fh)
-    common_episodes = config["common"]["eval_nums"]
-    episodes = {
-        task: (settings or {}).get("eval_nums", common_episodes)
-        for task, settings in config["tasks"].items()
-    }
-    if not episodes or any(type(count) is not int or count <= 0 for count in episodes.values()):
-        raise SystemExit(f"Invalid MiVerse task episode counts in {path}")
-    return episodes
-
-
-def experiment_label(experiment):
-    """Keep every directory-level experiment identifier visible in the output."""
-    policy, embodiment, run_info = experiment
-    label = f"{policy} / {embodiment} / {run_info or '(unlabeled run)'}"
-    return html.escape(label).replace("|", "&#124;").replace("\n", " ")
+DIMENSIONS = {"clean": "", "language": "_l", "spatial": "_s"}
+TASKS = [
+    "place_kettle_on_tv_stand",
+    "place_fruit_basket",
+    "throw_away_trash",
+    "put_object_in_sink",
+    "distribute_bowls_to_plates",
+    "place_objects_in_dishwasher",
+    "place_bread_in_oven",
+    "sweep_paper_ball_into_dustbin",
+]
+TOTAL_REQUIRED = len(TASKS) * len(EXPECTED_SEEDS)
+TIMESTAMP_FORMATS = [
+    (re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}"), "%Y-%m-%d_%H-%M-%S"),
+    (re.compile(r"\d{8}_\d{6}"), "%Y%m%d_%H%M%S"),
+]
 
 
 def list_subdirs(path):
@@ -80,402 +59,318 @@ def list_subdirs(path):
     )
 
 
+def timestamp_key(ts_dir):
+    """Compare both supported timestamp formats, including prefixed run names."""
+    name = os.path.basename(ts_dir)
+    for pattern, fmt in TIMESTAMP_FORMATS:
+        match = pattern.search(name)
+        if match:
+            try:
+                return datetime.strptime(match.group(), fmt).timestamp(), ts_dir
+            except ValueError:
+                pass
+    return os.path.getmtime(os.path.join(ts_dir, "_result.json")), ts_dir
+
+
 def latest_timestamp_dir(run_dir):
-    """Return the latest timestamp subdir that contains a `_result.json`."""
-    candidates = []
-    for name in list_subdirs(run_dir):
-        if os.path.isfile(os.path.join(run_dir, name, "_result.json")):
-            candidates.append(name)
-    if not candidates:
-        return None
-    # Timestamp format `YYYY-MM-DD_HH-MM-SS` sorts chronologically as a string.
-    return os.path.join(run_dir, sorted(candidates)[-1])
+    candidates = [
+        os.path.join(run_dir, name) for name in list_subdirs(run_dir)
+        if os.path.isfile(os.path.join(run_dir, name, "_result.json"))
+    ]
+    return max(candidates, key=timestamp_key) if candidates else None
 
 
 def load_entries(ts_dir):
-    """Load (success, score) entries sorted by episode index from a timestamp dir."""
+    """Read the first 25 episodes by numeric result key, not by layout_id."""
     path = os.path.join(ts_dir, "_result.json")
-
-    def invalid(reason):
-        print(f"Warning: ignoring {path}: {reason}", file=sys.stderr)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        details = data["details"]
+        if not isinstance(details, dict):
+            raise ValueError("details must be a mapping")
+        indexed = []
+        for key, entry in details.items():
+            try:
+                index = int(key)
+            except (TypeError, ValueError):
+                continue
+            if index >= 0:
+                indexed.append((index, entry))
+        indexed.sort(key=lambda item: item[0])
+        if len({index for index, _ in indexed}) != len(indexed):
+            raise ValueError("duplicate episode indices")
+        entries = []
+        for _, entry in indexed[:EPISODES]:
+            success = entry["success"]
+            score = float(entry["score"])
+            if not isinstance(success, bool) or not math.isfinite(score) or not 0 <= score <= 1:
+                raise ValueError("success must be bool and score must be in [0, 1]")
+            entries.append((success, score))
+        return entries
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        warnings.warn(f"Skipping invalid result {path}: {exc}", stacklevel=2)
         return None
 
-    try:
-        with open(path) as fh:
-            data = json.load(fh)
-    except (ValueError, OSError) as exc:
-        return invalid(str(exc))
-    if not isinstance(data, dict) or not isinstance(data.get("details"), dict):
-        return invalid("expected an object containing a details object")
-    details = data["details"]
-    items = []
-    indices = set()
-    for key, entry in details.items():
-        if not re.fullmatch(r"\d+", key) or not isinstance(entry, dict):
-            return invalid(f"invalid episode record {key!r}")
-        try:
-            index = int(key)
-        except ValueError:
-            return invalid(f"invalid episode index {key!r}")
-        if index in indices:
-            return invalid(f"duplicate episode index {index}")
-        indices.add(index)
-        success = entry.get("success")
-        score = entry.get("score")
-        if type(success) is not bool:
-            return invalid(f"episode {key}: success must be a boolean")
-        if type(score) not in (int, float) or not 0 <= score <= 1:
-            return invalid(f"episode {key}: score must be a finite number in [0, 1]")
-        items.append((index, success, float(score)))
-    items.sort(key=lambda x: x[0])
-    return [(s, sc) for _, s, sc in items]
 
-
-def scan_task(task, ckpt=None, action_type=None, env_cfg=None):
-    """Return {(experiment, seed): entries}, keeping result configurations apart."""
-    task_path = os.path.join(ROOT, task)
-    out = {}
+def scan_task(task, root=None):
+    """Return latest entries by (policy, config, seed), without mixing configs."""
+    task_path = os.path.join(ROOT if root is None else root, task)
+    latest = {}
     for policy in list_subdirs(task_path):
         policy_path = os.path.join(task_path, policy)
-        for embodiment in list_subdirs(policy_path):
-            if env_cfg is not None and embodiment != env_cfg:
-                continue
-            emb_path = os.path.join(policy_path, embodiment)
-            for run in list_subdirs(emb_path):
-                m = SEED_RE.match(run)
-                if not m:
+        for config in list_subdirs(policy_path):
+            config_path = os.path.join(policy_path, config)
+            for run in list_subdirs(config_path):
+                match = SEED_RE.match(run)
+                if not match or int(match.group(1)) not in EXPECTED_SEEDS:
                     continue
-                seed = int(m.group(1))
-                if seed not in EXPECTED_SEEDS:
-                    continue
-                run_info = run[m.end():]
-                metadata = dict(
-                    item.split("=", 1) for item in run_info.split(",") if "=" in item
-                )
-                if ckpt is not None and metadata.get("ckpt_name") != ckpt:
-                    continue
-                if action_type is not None and metadata.get("action_type") != action_type:
-                    continue
-                ts_dir = latest_timestamp_dir(os.path.join(emb_path, run))
+                ts_dir = latest_timestamp_dir(os.path.join(config_path, run))
                 if ts_dir is None:
                     continue
-                entries = load_entries(ts_dir)
-                if entries is None:
-                    continue
-                out[((policy, embodiment, run_info), seed)] = entries
-    return out
+                key = (policy, config, int(match.group(1)))
+                if key not in latest or timestamp_key(ts_dir) > timestamp_key(latest[key]):
+                    latest[key] = ts_dir
+    # Select before loading: an incomplete/invalid latest run must not silently
+    # fall back to an older completed evaluation.
+    return {key: load_entries(path) for key, path in latest.items()}
 
 
 def stats(entries):
     count = len(entries)
-    if count == 0:
+    if not count:
         return 0, 0.0, 0.0
-    successes = sum(1 for s, _ in entries if s)
-    score_sum = sum(sc for _, sc in entries)
-    return count, successes / count * 100.0, score_sum / count * 100.0
+    return (count, sum(success for success, _ in entries) / count * 100,
+            sum(score for _, score in entries) / count * 100)
 
 
-def main(root=None, output=None, ckpt=None, action_type=None, env_cfg=None):
-    global ROOT, OUTPUT_MD, TASKS, TASK_EPISODES, TOTAL_REQUIRED
-    ROOT = root or ROOT
-    OUTPUT_MD = output or os.path.join(ROOT, "_summary.md")
-    if not os.path.isdir(ROOT):
-        raise SystemExit(
-            f"Eval result directory not found: {ROOT}\n"
-            "Use --root, set MIVERSE_EVAL_ROOT, or create eval_result/MiVerse."
-        )
-    TASK_EPISODES = load_task_spec()
-    TASKS = list(TASK_EPISODES)
-    TOTAL_REQUIRED = len(TASKS) * len(EXPECTED_SEEDS)
+def collect_data(root=None):
+    """data[policy][dimension][base_task][seed] = (SR, Score).
 
-    # data[(policy, config_name, run_info)][task][seed] = (success_rate, score)
+    Config directories stay separate while picking the latest run, then fold
+    into the policy. Sorted config order matches RoboDojo's sorted
+    ``(policy, embodiment, seed)`` walk: the last complete config wins.
+    """
     data = {}
-
-    def record(policy, task, seed, sr, score):
-        data.setdefault(policy, {}).setdefault(task, {})[seed] = (sr, score)
-
-    for task in TASKS:
-        for key, entries in scan_task(task, ckpt, action_type, env_cfg).items():
-            policy, seed = key
-            data.setdefault(policy, {})
-            episodes = TASK_EPISODES[task]
-            if len(entries) < episodes:
-                continue
-            _, sr, score = stats(entries[:episodes])
-            record(policy, task, seed, sr, score)
-
-    write_markdown(data)
-    n_cells = sum(len(seeds) for tasks in data.values() for seeds in tasks.values())
-    complete = sum(1 for p in data if policy_is_complete(p, data))
-    tested = sum(1 for p in data if policy_progress(p, data)[0] > 0)
-    print(
-        f"Wrote {len(data)} experiment tables ({n_cells} filled cells, "
-        f"{tested} in overview, {complete} complete) to {OUTPUT_MD}"
-    )
-
-
-def mean_with_spread(values, integer=False):
-    """Format `mean ±amp` where amp is half the (max - min) range across seeds.
-
-    Returns "" when there is no data so the cell stays blank.
-    """
-    if not values:
-        return ""
-    mean = sum(values) / len(values)
-    amp = (max(values) - min(values)) / 2.0
-    fmt = "{:.0f}" if integer else "{:.2f}"
-    return f"{fmt.format(mean)} ±{fmt.format(amp)}"
-
-
-def task_seed_means(task_data, seeds):
-    """Average a task's per-seed (sr, score) over the given seed list.
-
-    Returns None unless every seed has a completed result.
-    """
-    if not seeds:
-        return None
-    try:
-        values = [task_data[seed] for seed in seeds]
-    except KeyError:
-        return None
-    srs = [sr for sr, _ in values]
-    scores = [sc for _, sc in values]
-    return sum(srs) / len(srs), sum(scores) / len(scores)
-
-
-def policy_progress(policy, data):
-    """Return (filled_cells, total_cells, percent) for a policy."""
-    policy_data = data.get(policy, {})
-    filled = sum(
-        1 for task in TASKS
-        for seed in EXPECTED_SEEDS
-        if seed in policy_data.get(task, {})
-    )
-    pct = filled / TOTAL_REQUIRED * 100.0
-    return filled, TOTAL_REQUIRED, pct
-
-
-def format_progress(filled, total, pct, complete):
-    """Format progress for the overview table."""
-    if complete:
-        return f"{pct:.0f}%"
-    return f"{pct:.1f}% † ({filled}/{total})"
-
-
-def policy_is_complete(policy, data):
-    """True when all 24 (8 tasks x 3 seeds) cells are filled."""
-    policy_data = data.get(policy, {})
-    for task in TASKS:
-        if task_seed_means(policy_data.get(task, {}), EXPECTED_SEEDS) is None:
-            return False
-    return True
+    for dimension, suffix in DIMENSIONS.items():
+        for task in TASKS:
+            scanned = scan_task(task + suffix, root)
+            for policy, _config, seed in sorted(scanned):
+                entries = scanned[(policy, _config, seed)]
+                dimension_data = data.setdefault(policy, {}).setdefault(dimension, {})
+                if entries is None or len(entries) < EPISODES:
+                    continue
+                _, sr, score = stats(entries[:EPISODES])
+                dimension_data.setdefault(task, {})[seed] = (sr, score)
+    return data
 
 
 def mean_std(values):
-    """Return (mean, population std) over values, or None when empty."""
+    """Population standard deviation, used consistently for all seed averages."""
     if not values:
         return None
-    mean = sum(values) / len(values)
-    std = statistics.pstdev(values) if len(values) > 1 else 0.0
-    return mean, std
+    return statistics.mean(values), statistics.pstdev(values)
 
 
 def format_mean_std(stat):
-    """Format `mean ±std` to two decimals; blank when no data."""
-    if stat is None:
-        return ""
-    mean, std = stat
-    return f"{mean:.2f} ±{std:.2f}"
+    return "" if stat is None else f"{stat[0]:.2f} ±{stat[1]:.2f}"
 
 
-def seed_task_means(policy_data, seed):
-    """Unweighted mean SR/Score of the tasks that have data at this seed."""
-    srs = []
-    scores = []
-    for task in TASKS:
-        task_data = policy_data.get(task, {})
-        if seed in task_data:
-            sr, score = task_data[seed]
-            srs.append(sr)
-            scores.append(score)
-    if not srs:
+def seed_task_count(dimension_data, seed):
+    return sum(seed in dimension_data.get(task, {}) for task in TASKS)
+
+
+def seed_task_means(dimension_data, seed):
+    values = [dimension_data[task][seed] for task in TASKS
+              if seed in dimension_data.get(task, {})]
+    if not values:
         return None
-    return sum(srs) / len(srs), sum(scores) / len(scores)
+    return tuple(statistics.mean(items) for items in zip(*values))
 
 
-def policy_overall(policy_data):
-    """Return ((sr_mean, sr_std), (score_mean, score_std)) across seeds.
+def policy_progress(dimension_data):
+    filled = sum(seed_task_count(dimension_data, seed) for seed in EXPECTED_SEEDS)
+    return filled, TOTAL_REQUIRED, filled / TOTAL_REQUIRED * 100
 
-    Each seed contributes the unweighted mean of the finished tasks. None when
-    no seed has data.
-    """
-    srs = []
-    scores = []
-    for seed in EXPECTED_SEEDS:
-        value = seed_task_means(policy_data, seed)
-        if value is None:
-            continue
-        srs.append(value[0])
-        scores.append(value[1])
-    if not srs:
+
+def policy_is_complete(dimension_data):
+    return policy_progress(dimension_data)[0] == TOTAL_REQUIRED
+
+
+def policy_overall(dimension_data):
+    """Mean ±std of the three seed means; require all three seeds to be present."""
+    means = [seed_task_means(dimension_data, seed) for seed in EXPECTED_SEEDS]
+    if any(value is None for value in means):
         return None
-    return mean_std(srs), mean_std(scores)
+    return tuple(mean_std(values) for values in zip(*means))
+
+
+def format_progress(dimension_data):
+    filled, total, pct = policy_progress(dimension_data)
+    marker = "" if filled == total else " †"
+    return f"{filled}/{total} ({pct:.1f}%){marker}"
+
+
+def markdown_cell(value):
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def append_table(lines, header, rows):
+    lines.append("| " + " | ".join(map(markdown_cell, header)) + " |")
+    lines.append("| " + " | ".join("---" for _ in header) + " |")
+    for cells in rows:
+        lines.append("| " + " | ".join(map(markdown_cell, cells)) + " |")
+    lines.append("")
+
+
+def ranking_rows(data, dimension):
+    """Rank every policy on one dimension, highest success rate first."""
+    ranked = []
+    unranked = []
+    for policy, dimensions in data.items():
+        dimension_data = dimensions.get(dimension, {})
+        overall = policy_overall(dimension_data)
+        if overall is None:
+            unranked.append((policy, dimension_data))
+        else:
+            ranked.append((policy, dimension_data, overall))
+    ranked.sort(key=lambda item: (-item[2][0][0], -item[2][1][0], item[0]))
+    unranked.sort(key=lambda item: item[0])
+    rows = []
+    for index, (policy, dimension_data, overall) in enumerate(ranked, start=1):
+        marker = "" if policy_is_complete(dimension_data) else " †"
+        sr, score = overall
+        rows.append([
+            index,
+            policy,
+            format_mean_std(sr) + marker,
+            format_mean_std(score) + marker,
+            format_progress(dimension_data),
+        ])
+    for policy, dimension_data in unranked:
+        rows.append(["", policy, "", "", format_progress(dimension_data)])
+    return rows
+
+
+def section_order(data):
+    """Detail sections follow the clean ranking, then policies with no clean score."""
+    def sort_key(item):
+        policy, dimensions = item
+        overall = policy_overall(dimensions.get("clean", {}))
+        if overall is None:
+            return (1, 0.0, 0.0, policy)
+        sr, score = overall
+        return (0, -sr[0], -score[0], policy)
+
+    return sorted(data.items(), key=sort_key)
 
 
 def build_overview(data):
-    """Overview of tested policies, sorted by average SR (descending).
-
-    Avg SR and Avg Score are the unweighted mean of the 8 tasks, shown as
-    `mean ±std` across seeds. A cell needs 50 episodes. Incomplete policies
-    average the tasks finished so far.
-    """
     lines = [
-        "## Overview",
-        "",
-        f"Progress † marks incomplete evaluation ({TOTAL_REQUIRED} = {len(TASKS)} tasks × 3 seeds). "
-        f"Avg SR and Avg Score are the unweighted mean of the {len(TASKS)} tasks, "
-        "shown as `mean ±std` across seeds. Experiments are sorted by Avg SR.",
-        "",
+        "## Policy ranking by dimension", "",
+        "Each dimension ranks every policy from high to low by success rate. "
+        "Score breaks ties. The value is the equally weighted mean ± population "
+        "std of the seed 0/1/2 task averages. A blank rank means that dimension "
+        "has no three-seed average. Policy names are shown without the eval-config suffix.", "",
     ]
-
-    header = ["Policy / config_name / run", "Progress", "Avg SR (%)", "Avg Score"]
-    lines.append("| " + " | ".join(header) + " |")
-    lines.append("| --- | " + " | ".join(["---:"] * (len(header) - 1)) + " |")
-
-    rows = []
-    for policy in data:
-        filled, total, pct = policy_progress(policy, data)
-        if filled == 0:
-            continue
-        complete = policy_is_complete(policy, data)
-        overall = policy_overall(data[policy])
-        sort_key = overall[0][0] if overall else float("-inf")
-        cells = [experiment_label(policy), format_progress(filled, total, pct, complete)]
-        if overall is None:
-            cells.extend(["", ""])
-        else:
-            cells.append(format_mean_std(overall[0]))
-            cells.append(format_mean_std(overall[1]))
-        rows.append((sort_key, policy, cells))
-
-    rows.sort(key=lambda r: (-r[0], r[1]))
-    for _, _, cells in rows:
-        lines.append("| " + " | ".join(cells) + " |")
-    lines.append("")
+    for dimension in DIMENSIONS:
+        lines.extend([f"### {dimension}", ""])
+        append_table(
+            lines,
+            ["Rank", "Policy", "SR (%)", "Score (%)", "Progress"],
+            ranking_rows(data, dimension),
+        )
     return lines
 
 
 def format_task_row(task, task_data):
-    """Build one task row: per-seed cells plus cross-seed average."""
-    cells = [f"<nobr>{task}</nobr>"]
-    srs = []
-    scores = []
+    cells = [task]
+    values = []
     for seed in EXPECTED_SEEDS:
         if seed in task_data:
             sr, score = task_data[seed]
-            cells.append(f"{sr:.0f}")
-            cells.append(f"{score:.2f}")
-            srs.append(sr)
-            scores.append(score)
+            cells.extend([f"{sr:.2f}", f"{score:.2f}"])
+            values.append((sr, score))
         else:
-            cells.append("")
-            cells.append("")
-    if len(srs) == len(EXPECTED_SEEDS):
-        cells.append(mean_with_spread(srs, integer=True))
-        cells.append(mean_with_spread(scores))
+            cells.extend(["", ""])
+    if len(values) == len(EXPECTED_SEEDS):
+        cells.extend(format_mean_std(mean_std(items)) for items in zip(*values))
     else:
         cells.extend(["", ""])
     return cells
 
 
-def format_avg_row(policy_data):
-    """Summary row: unweighted mean of the 8 tasks, per seed and across seeds."""
-    cells = [f"**Avg ({len(TASKS)} tasks)**"]
-    seed_srs = []
-    seed_scores = []
+def format_avg_row(dimension_data):
+    cells = ["**Avg across tasks**"]
     for seed in EXPECTED_SEEDS:
-        means = seed_task_means(policy_data, seed)
+        means = seed_task_means(dimension_data, seed)
         if means is None:
             cells.extend(["", ""])
         else:
-            sr, score = means
-            cells.append(f"{sr:.1f}")
-            cells.append(f"{score:.2f}")
-            seed_srs.append(sr)
-            seed_scores.append(score)
-    if len(seed_srs) == len(EXPECTED_SEEDS):
-        cells.append(mean_with_spread(seed_srs, integer=True))
-        cells.append(mean_with_spread(seed_scores))
-    else:
+            marker = "" if seed_task_count(dimension_data, seed) == len(TASKS) else " †"
+            cells.extend(f"{value:.2f}{marker}" for value in means)
+    overall = policy_overall(dimension_data)
+    if overall is None:
         cells.extend(["", ""])
+    else:
+        marker = "" if policy_is_complete(dimension_data) else " †"
+        cells.extend(format_mean_std(value) + marker for value in overall)
     return cells
 
 
-def write_markdown(data):
-    lines = ["# MiVerse Evaluation Summary", ""]
-    episode_counts = set(TASK_EPISODES.values())
-    count_note = f" ({next(iter(episode_counts))} episodes per task)" if len(episode_counts) == 1 else ""
-    lines.extend([
-        "Each config_name and run label (including checkpoint and action type) is summarized separately. "
-        "Only seeds 0, 1, 2 are counted. Each task needs its native episode count from "
-        f"`task/MiVerse/config/_task.yml`{count_note}. Latest incomplete results stay blank; "
-        "invalid results are reported in the terminal.",
-        "",
-    ])
+def write_markdown(data, output_path=None):
+    lines = [
+        "# MiVerse Evaluation Summary", "",
+        "- Dimensions: **clean** = original task; **language** = `_l`; **spatial** = `_s`.",
+        f"- Each task/seed uses only the first **{EPISODES}** completed episodes, "
+        "sorted by the numeric `details` key, not `layout_id`. Later episodes are ignored.",
+        f"- Use the latest result per task/policy/eval config/seed, then keep one "
+        f"result per policy. Configs are taken in sorted order; a complete result "
+        f"replaces an earlier config, and fewer than {EPISODES} episodes does not. "
+        "No fallback to an older run inside the same config.",
+        "- SR = successes / 25 × 100; Score = sum of episode scores / 25 × 100.",
+        "- Each seed averages its completed tasks equally. The three-seed average "
+        "is blank unless seed 0, 1, and 2 all have completed task results.",
+        "- **†** means incomplete task coverage: averages use only completed tasks "
+        "and are provisional. Only 24/24 cells gives a complete dimension score.",
+        "- All `±` values are population standard deviations across the three seeds.",
+        "- Each dimension ranks every policy from high to low by success rate. "
+        "Headings use the policy name only, without the eval-config suffix.", "",
+    ]
     lines += build_overview(data)
-
-    for policy in sorted(data):
-        lines.append(f"## {experiment_label(policy)}")
-        lines.append("")
-
-        header = ["Task"]
-        for seed in EXPECTED_SEEDS:
-            header.append(f"Seed {seed} SR (%)")
-            header.append(f"Seed {seed} Score")
-        header.append("Avg SR (%)")
-        header.append("Avg Score")
-        lines.append("| " + " | ".join(header) + " |")
-        lines.append("| --- | " + " | ".join(["---:"] * (len(header) - 1)) + " |")
-
-        policy_data = data[policy]
-        for task in TASKS:
-            cells = format_task_row(task, policy_data.get(task, {}))
-            lines.append("| " + " | ".join(cells) + " |")
-        lines.append("| " + " | ".join(format_avg_row(policy_data)) + " |")
-        lines.append("")
-
-    os.makedirs(os.path.dirname(os.path.abspath(OUTPUT_MD)), exist_ok=True)
-    with open(OUTPUT_MD, "w") as fh:
+    for policy, dimensions in section_order(data):
+        lines.extend([f"## {markdown_cell(policy)}", ""])
+        for dimension, suffix in DIMENSIONS.items():
+            dimension_data = dimensions.get(dimension, {})
+            coverage = ", ".join(
+                f"seed {seed}: {seed_task_count(dimension_data, seed)}/{len(TASKS)} tasks"
+                for seed in EXPECTED_SEEDS
+            )
+            lines.extend([f"### {dimension}", "", f"Completed — {coverage}.", ""])
+            header = ["Task"]
+            for seed in EXPECTED_SEEDS:
+                header.extend([f"Seed {seed} SR (%)", f"Seed {seed} Score (%)"])
+            header.extend(["3-seed SR (%) mean ±std", "3-seed Score (%) mean ±std"])
+            rows = [format_task_row(task + suffix, dimension_data.get(task, {})) for task in TASKS]
+            rows.append(format_avg_row(dimension_data))
+            append_table(lines, header, rows)
+    with open(OUTPUT_MD if output_path is None else output_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
 
-def cli(argv=None):
-    """Summarize MiVerse results without changing the RoboDojo CLI."""
-    parser = argparse.ArgumentParser(
-        description="Summarize completed MiVerse evaluation results."
-    )
-    parser.add_argument("--dataset", choices=("MiVerse",), default="MiVerse", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--root",
-        help="Result root containing task directories; defaults to MIVERSE_EVAL_ROOT or eval_result/MiVerse.",
-    )
-    parser.add_argument("--output", help="Markdown output path (default: <root>/_summary.md).")
-    parser.add_argument("--ckpt", help="Only include this exact ckpt_name from result directory names.")
-    parser.add_argument("--action-type", help="Only include this exact action_type from result directory names.")
-    parser.add_argument(
-        "--env-cfg", help="Only include this result config_name (e.g. miverse_teleop), not the YAML filename."
-    )
-    args = parser.parse_args(argv)
-    root = os.path.abspath(os.path.expanduser(args.root or os.environ.get(
-        "MIVERSE_EVAL_ROOT",
-        os.path.join(SCRIPT_DIR, "..", "..", "eval_result", "MiVerse"),
-    )))
-    output = os.path.abspath(os.path.expanduser(args.output or os.path.join(root, "_summary.md")))
-    main(
-        root=root, output=output, ckpt=args.ckpt,
-        action_type=args.action_type, env_cfg=args.env_cfg,
-    )
+def main():
+    if not os.path.isdir(ROOT):
+        raise SystemExit(
+            f"Eval result directory not found: {ROOT}\n"
+            "Set MIVERSE_EVAL_ROOT or run with eval_result/MiVerse present."
+        )
+    data = collect_data()
+    write_markdown(data)
+    filled = sum(policy_progress(tasks)[0] for dims in data.values() for tasks in dims.values())
+    complete = sum(policy_is_complete(tasks) for dims in data.values() for tasks in dims.values())
+    print(f"Wrote {len(data)} policies, {filled} completed task/seed cells, "
+          f"{complete} complete dimensions to {OUTPUT_MD}")
 
 
 if __name__ == "__main__":
-    cli()
+    main()
