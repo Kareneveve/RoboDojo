@@ -9,7 +9,7 @@ from isaacsim.core.utils.string import find_unique_string_name
 import numpy as np
 from omegaconf import DictConfig
 import omni.usd
-from pxr import Gf, Sdf, Usd, UsdGeom
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 import torch
 
 from env.scene_manager.layout_manager import LayoutManager
@@ -62,7 +62,11 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         self.default_pos = default_pos
         self.default_ori = default_ori
         self.scale = scale
-        self.mass = min(self.physics_config.get("mass", 0.5), 0.5)
+        # Resolve the configured mass after reading the authored USD mass.
+        # Keep a positive fallback during construction because the USD mass
+        # API is inspected below, before the PhysX view is initialized.
+        configured_mass = self.physics_config.get("mass", None)
+        self.mass = float(configured_mass) if configured_mass is not None else 0.5
         self.visible = self.visual_config.get("visible", True)
 
         self.physics_material_path = find_unique_string_name(
@@ -94,6 +98,14 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
             orientation=self.default_ori,
             scale=self.scale,
         )
+        self._mass_api_prim = self._find_mass_api_prim()
+        self._asset_mass = self._read_asset_mass()
+        if configured_mass is None and self._asset_mass is not None and self._asset_mass > 0:
+            self.mass = float(self._asset_mass)
+        self._asset_diagonal_inertia = self._read_asset_diagonal_inertia()
+        self._asset_center_of_mass = self._read_mass_attribute("GetCenterOfMassAttr")
+        self._asset_principal_axes = self._read_mass_attribute("GetPrincipalAxesAttr")
+        self._mass_inertia_synced = False
         self._default_linear_velocity = [0.0, 0.0, 0.0]
         self._default_angular_velocity = [0.0, 0.0, 0.0]
 
@@ -136,6 +148,135 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
             if prim.IsA(UsdGeom.Mesh):
                 return prim.GetPath().pathString
         return None
+
+    def _find_mass_api_prim(self):
+        """Find the asset prim carrying the authored mass properties."""
+        root_prim = self.stage.GetPrimAtPath(self._prim_path)
+        if not root_prim or not root_prim.IsValid():
+            return None
+
+        if root_prim.HasAPI(UsdPhysics.MassAPI):
+            return root_prim
+
+        for prim in Usd.PrimRange(root_prim):
+            if prim.HasAPI(UsdPhysics.MassAPI):
+                return prim
+        return None
+
+    def _read_asset_mass(self):
+        """Read the authored asset mass before the configured mass is applied."""
+        if self._mass_api_prim is None:
+            return self.mass
+
+        mass_api = UsdPhysics.MassAPI.Get(self.stage, self._mass_api_prim.GetPath())
+        mass_value = mass_api.GetMassAttr().Get()
+        if mass_value is None or float(mass_value) <= 0:
+            return self.mass
+        return float(mass_value)
+
+    def _read_asset_diagonal_inertia(self):
+        """Read the asset's authored diagonal inertia before the override."""
+        if self._mass_api_prim is None:
+            return None
+
+        mass_api = UsdPhysics.MassAPI.Get(self.stage, self._mass_api_prim.GetPath())
+        diagonal_inertia = mass_api.GetDiagonalInertiaAttr().Get()
+        if diagonal_inertia is None or not any(float(value) > 0.0 for value in diagonal_inertia):
+            return None
+        return diagonal_inertia
+
+    def _read_mass_attribute(self, getter_name):
+        """Read an authored MassAPI attribute without changing its fallback behavior."""
+        if self._mass_api_prim is None:
+            return None
+
+        mass_api = UsdPhysics.MassAPI.Get(self.stage, self._mass_api_prim.GetPath())
+        return getattr(mass_api, getter_name)().Get()
+
+    @staticmethod
+    def _inertia_matrix_to_usd_attributes(inertia_matrix):
+        """Convert a body-frame inertia matrix to USD principal inertia attributes."""
+        inertia_matrix = np.asarray(inertia_matrix, dtype=np.float64).reshape(3, 3)
+        inertia_matrix = 0.5 * (inertia_matrix + inertia_matrix.T)
+        diagonal_inertia, principal_axes = np.linalg.eigh(inertia_matrix)
+        if np.linalg.det(principal_axes) < 0:
+            principal_axes[:, 0] *= -1.0
+
+        trace = np.trace(principal_axes)
+        if trace > 0.0:
+            w = 0.5 * np.sqrt(trace + 1.0)
+            scale = 4.0 * w
+            x = (principal_axes[2, 1] - principal_axes[1, 2]) / scale
+            y = (principal_axes[0, 2] - principal_axes[2, 0]) / scale
+            z = (principal_axes[1, 0] - principal_axes[0, 1]) / scale
+        elif principal_axes[0, 0] > principal_axes[1, 1] and principal_axes[0, 0] > principal_axes[2, 2]:
+            x = 0.5 * np.sqrt(max(0.0, 1.0 + principal_axes[0, 0] - principal_axes[1, 1] - principal_axes[2, 2]))
+            scale = 4.0 * x
+            w = (principal_axes[2, 1] - principal_axes[1, 2]) / scale
+            y = (principal_axes[0, 1] + principal_axes[1, 0]) / scale
+            z = (principal_axes[0, 2] + principal_axes[2, 0]) / scale
+        elif principal_axes[1, 1] > principal_axes[2, 2]:
+            y = 0.5 * np.sqrt(max(0.0, 1.0 + principal_axes[1, 1] - principal_axes[0, 0] - principal_axes[2, 2]))
+            scale = 4.0 * y
+            w = (principal_axes[0, 2] - principal_axes[2, 0]) / scale
+            x = (principal_axes[0, 1] + principal_axes[1, 0]) / scale
+            z = (principal_axes[1, 2] + principal_axes[2, 1]) / scale
+        else:
+            z = 0.5 * np.sqrt(max(0.0, 1.0 + principal_axes[2, 2] - principal_axes[0, 0] - principal_axes[1, 1]))
+            scale = 4.0 * z
+            w = (principal_axes[1, 0] - principal_axes[0, 1]) / scale
+            x = (principal_axes[0, 2] + principal_axes[2, 0]) / scale
+            y = (principal_axes[1, 2] + principal_axes[2, 1]) / scale
+
+        return Gf.Vec3f(*[float(value) for value in diagonal_inertia]), Gf.Quatf(
+            float(w), Gf.Vec3f(float(x), float(y), float(z))
+        )
+
+    def _sync_mass_properties(self):
+        """Keep authored inertia consistent with the configured mass override."""
+        if self._mass_inertia_synced:
+            return
+
+        view = self._rigid_prim_view
+        masses = view.get_masses()
+        masses[0] = self.mass
+        view.set_masses(masses)
+
+        inertias = view.get_inertias()
+        if self._asset_diagonal_inertia is not None:
+            ratio = self.mass / self._asset_mass if self._asset_mass > 0 else 1.0
+            target_inertias = inertias * ratio
+        else:
+            target_inertias = inertias
+        view.set_inertias(target_inertias)
+
+        if self._mass_api_prim is None:
+            self._mass_api_prim = self._find_mass_api_prim()
+        if self._mass_api_prim is not None:
+            mass_api = UsdPhysics.MassAPI.Get(self.stage, self._mass_api_prim.GetPath())
+            mass_api.CreateMassAttr().Set(self.mass)
+            if self._asset_diagonal_inertia is not None:
+                target_diagonal_inertia = Gf.Vec3f(
+                    self._asset_diagonal_inertia[0] * ratio,
+                    self._asset_diagonal_inertia[1] * ratio,
+                    self._asset_diagonal_inertia[2] * ratio,
+                )
+                mass_api.CreateDiagonalInertiaAttr().Set(target_diagonal_inertia)
+                if self._asset_center_of_mass is not None:
+                    mass_api.CreateCenterOfMassAttr().Set(self._asset_center_of_mass)
+                if self._asset_principal_axes is not None:
+                    mass_api.CreatePrincipalAxesAttr().Set(self._asset_principal_axes)
+            else:
+                target_diagonal_inertia, target_principal_axes = self._inertia_matrix_to_usd_attributes(
+                    target_inertias[0]
+                )
+                mass_api.CreateDiagonalInertiaAttr().Set(target_diagonal_inertia)
+                mass_api.CreatePrincipalAxesAttr().Set(target_principal_axes)
+                com_positions, _ = view.get_coms()
+                center_of_mass = np.asarray(com_positions[0], dtype=np.float32).reshape(-1)[:3]
+                mass_api.CreateCenterOfMassAttr().Set(Gf.Vec3f(*[float(value) for value in center_of_mass]))
+
+        self._mass_inertia_synced = True
 
     def sample_mesh_vertices(self):
         """
@@ -237,6 +378,7 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
     def initialize(self):
         self.physics_sim_view = SimulationManager.get_physics_sim_view()
         super().initialize(physics_sim_view=self.physics_sim_view)
+        self._sync_mass_properties()
 
     def _apply_default_velocities(self):
         """Re-apply default linear/angular velocity if configured."""
