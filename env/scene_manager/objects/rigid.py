@@ -1,6 +1,5 @@
 import random
 
-from isaacsim.core.api.materials.physics_material import PhysicsMaterial
 from isaacsim.core.prims import SingleGeometryPrim, SingleRigidPrim
 from isaacsim.core.simulation_manager import SimulationManager
 from isaacsim.core.utils.prims import get_prim_at_path, is_prim_path_valid
@@ -9,10 +8,11 @@ from isaacsim.core.utils.string import find_unique_string_name
 import numpy as np
 from omegaconf import DictConfig
 import omni.usd
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 import torch
 
 from env.scene_manager.layout_manager import LayoutManager
+from env.scene_manager.objects.physics_material import PhysicsMaterial
 
 
 class RigidObject(SingleRigidPrim, SingleGeometryPrim):
@@ -75,9 +75,50 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         )
         self.physics_material = PhysicsMaterial(
             prim_path=self.physics_material_path,
-            static_friction=self.physics_config.get("static_friction", 0.6),
-            dynamic_friction=self.physics_config.get("dynamic_friction", 1.5),
+            static_friction=self.physics_config.get(
+                "static_friction",
+                self.physics_config.get("friction", 0.6),
+            ),
+            dynamic_friction=self.physics_config.get(
+                "dynamic_friction",
+                self.physics_config.get("friction", 1.5),
+            ),
             restitution=self.physics_config.get("restitution", 0.0),
+            config=self.physics_config,
+        )
+
+        mass_api = (
+            UsdPhysics.MassAPI(prim)
+            if prim.HasAPI(UsdPhysics.MassAPI)
+            else UsdPhysics.MassAPI.Apply(prim)
+        )
+        authored_mass = mass_api.GetMassAttr().Get()
+        authored_diagonal_inertia = mass_api.GetDiagonalInertiaAttr().Get()
+        self._authored_mass_before_override = float(authored_mass) if authored_mass is not None else None
+        self._authored_diagonal_inertia_before_override = (
+            np.asarray(authored_diagonal_inertia, dtype=np.float32)
+            if authored_diagonal_inertia is not None
+            else None
+        )
+        mass_api.CreateMassAttr().Set(self.mass)
+        if (
+            self._authored_mass_before_override
+            and self._authored_diagonal_inertia_before_override is not None
+        ):
+            inertia_scale = self.mass / self._authored_mass_before_override
+            scaled_diagonal_inertia = self._authored_diagonal_inertia_before_override * inertia_scale
+            mass_api.GetDiagonalInertiaAttr().Set(Gf.Vec3f(*scaled_diagonal_inertia.tolist()))
+
+        # Write the USD binding before either base class can flush a newly created PhysX handle.
+        # If an actor already exists before this wrapper is constructed, it must be created pre-reset.
+        if prim.HasAPI(UsdShade.MaterialBindingAPI):
+            material_binding = UsdShade.MaterialBindingAPI(prim)
+        else:
+            material_binding = UsdShade.MaterialBindingAPI.Apply(prim)
+        material_binding.Bind(
+            self.physics_material.material,
+            bindingStrength=UsdShade.Tokens.strongerThanDescendants,
+            materialPurpose="physics",
         )
 
         SingleGeometryPrim.__init__(
@@ -344,17 +385,100 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
 
     def _setup_physics(self):
         """Configure physics properties (rigid type, mass) from instance config."""
-        if self.mass <= 0:
-            self.mass = 0.05
-        self.set_mass(self.mass)
+        self._apply_mass_and_inertia()
 
         if self._default_linear_velocity is not None or self._default_angular_velocity is not None:
             self.set_default_state(
                 linear_velocity=self._default_linear_velocity,
                 angular_velocity=self._default_angular_velocity,
             )
-        if self.physics_material is not None:
-            self.apply_physics_material(physics_material=self.physics_material)
+
+    def set_mass(self, mass: float) -> None:
+        """Set mass and scale inertia consistently for this rigid body."""
+        mass = float(mass)
+        if mass <= 0.0:
+            mass = 0.05
+
+        rigid_view = getattr(self, "_rigid_prim_view", None)
+        if rigid_view is None or not rigid_view.is_physics_handle_valid():
+            prim = self.stage.GetPrimAtPath(self._prim_path)
+            mass_api = (
+                UsdPhysics.MassAPI(prim)
+                if prim.HasAPI(UsdPhysics.MassAPI)
+                else UsdPhysics.MassAPI.Apply(prim)
+            )
+            previous_mass = mass_api.GetMassAttr().Get()
+            previous_inertia = mass_api.GetDiagonalInertiaAttr().Get()
+            SingleRigidPrim.set_mass(self, mass)
+            if previous_mass and previous_mass > 0.0 and previous_inertia is not None:
+                scaled_inertia = np.asarray(previous_inertia, dtype=np.float32) * (mass / previous_mass)
+                mass_api.GetDiagonalInertiaAttr().Set(Gf.Vec3f(*scaled_inertia.tolist()))
+            self.mass = mass
+            return
+
+        current_masses = self._backend_utils.to_numpy(rigid_view.get_masses())
+        current_inertias = self._backend_utils.to_numpy(rigid_view.get_inertias())
+        previous_mass = float(np.asarray(current_masses).reshape(-1)[0])
+        inertia_values = np.asarray(current_inertias, dtype=np.float32).reshape(rigid_view.count, 9)
+        SingleRigidPrim.set_mass(self, mass)
+        if previous_mass > 0.0:
+            inertia_values *= mass / previous_mass
+            rigid_view.set_inertias(inertia_values)
+
+        prim = self.stage.GetPrimAtPath(self._prim_path)
+        mass_api = (
+            UsdPhysics.MassAPI(prim)
+            if prim.HasAPI(UsdPhysics.MassAPI)
+            else UsdPhysics.MassAPI.Apply(prim)
+        )
+        mass_api.CreateMassAttr().Set(mass)
+        if previous_mass > 0.0:
+            diagonal_inertia = np.diag(inertia_values[0].reshape(3, 3))
+            mass_api.GetDiagonalInertiaAttr().Set(Gf.Vec3f(*diagonal_inertia.tolist()))
+        self.mass = mass
+
+    def _apply_mass_and_inertia(self):
+        """Apply configured mass and keep the runtime inertia consistent with it."""
+        rigid_view = self._rigid_prim_view
+        if not rigid_view.is_physics_handle_valid():
+            SingleRigidPrim.set_mass(self, self.mass)
+            return
+
+        current_masses = self._backend_utils.to_numpy(rigid_view.get_masses())
+        current_inertias = self._backend_utils.to_numpy(rigid_view.get_inertias())
+        current_mass = float(np.asarray(current_masses).reshape(-1)[0])
+        inertia_values = np.asarray(current_inertias, dtype=np.float32).reshape(rigid_view.count, 9)
+
+        reference_mass = current_mass
+        if (
+            self._authored_mass_before_override is not None
+            and self._authored_diagonal_inertia_before_override is not None
+        ):
+            reference_mass = self._authored_mass_before_override
+
+        inertia_scale = self.mass / reference_mass if reference_mass > 0.0 else 1.0
+        if (
+            self._authored_diagonal_inertia_before_override is not None
+            and self._authored_mass_before_override
+        ):
+            expected_diagonal_inertia = self._authored_diagonal_inertia_before_override * inertia_scale
+            current_diagonal_inertia = np.diag(inertia_values[0].reshape(3, 3))
+            if np.allclose(current_diagonal_inertia, expected_diagonal_inertia, rtol=1e-4, atol=1e-6):
+                inertia_scale = 1.0
+
+        SingleRigidPrim.set_mass(self, self.mass)
+        if reference_mass > 0.0:
+            rigid_view.set_inertias(inertia_values * inertia_scale)
+
+            if (
+                self._authored_diagonal_inertia_before_override is not None
+                and self._authored_mass_before_override
+            ):
+                mass_api = UsdPhysics.MassAPI(self.stage.GetPrimAtPath(self._prim_path))
+                scaled_diagonal_inertia = self._authored_diagonal_inertia_before_override * (
+                    self.mass / self._authored_mass_before_override
+                )
+                mass_api.GetDiagonalInertiaAttr().Set(Gf.Vec3f(*scaled_diagonal_inertia.tolist()))
 
     def apply_saved_pose(self):
         """Apply the saved eval-layout pose and clear velocities."""
