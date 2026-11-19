@@ -77,6 +77,23 @@ class ControlManager:  # Control sequences for all environments
         self.robot_manager = robot_manager
         self.control_queue = [ControlSeq() for _ in range(self.num_envs)]  # create queue
         self.prev_control = [dict() for _ in range(self.num_envs)]
+        self.last_commanded_gripper = [dict() for _ in range(self.num_envs)]
+
+    def get_last_commanded_gripper(self, env_idx, gripper_key):
+        """Return the last gripper command committed for an environment."""
+        return self.last_commanded_gripper[env_idx].get(gripper_key)
+
+    def _update_last_commanded_gripper(self, env_idx, control_dict):
+        for robot in self.robot_manager.robot_list:
+            if robot.ee_type != "gripper":
+                continue
+            gripper_key = self.robot_manager.process_name(robot.gripper_name)
+            gripper_control = control_dict.get(gripper_key)
+            if gripper_control is None:
+                continue
+            position = gripper_control.get("position")
+            if position is not None and len(position) > 0:
+                self.last_commanded_gripper[env_idx][gripper_key] = float(position[0])
 
     def update_prev_control(self, env_idx, new_meta_ctrl: MetaControl):
         meta_ctrl_dict = new_meta_ctrl.get_action(self.robot_manager, env_idx)
@@ -84,6 +101,7 @@ class ControlManager:  # Control sequences for all environments
         for key in obs_list:
             if meta_ctrl_dict[key] is not None:
                 self.prev_control[env_idx][key] = meta_ctrl_dict[key]
+        self._update_last_commanded_gripper(env_idx, meta_ctrl_dict)
 
     def update_current_missing_ctrl_info(self, env_idx, new_meta_ctrl: MetaControl):
         meta_ctrl_dict = new_meta_ctrl.get_action(self.robot_manager, env_idx)
@@ -133,3 +151,4 @@ class ControlManager:  # Control sequences for all environments
     def reset(self):  # clean all queue
         self.control_queue = [ControlSeq() for _ in range(self.num_envs)]  # create queue
         self.prev_control = [dict() for _ in range(self.num_envs)]
+        self.last_commanded_gripper = [dict() for _ in range(self.num_envs)]
