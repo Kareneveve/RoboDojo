@@ -891,7 +891,18 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 if cam_key not in writers:
                     height, width, channels = color.shape
                     tmp_path = os.path.join(self._stream_dir, f"env{env_idx}_{cam_key}.tmp.mp4")
-                    writers[cam_key] = VideoStreamWriter(tmp_path, height, width, channels, fps=fps)
+                    # Keep only a small, bounded number of snapshots per
+                    # camera so recording cannot grow RAM usage during long
+                    # episodes. The writer blocks the producer when this
+                    # bound is reached instead of dropping frames.
+                    writers[cam_key] = VideoStreamWriter(
+                        tmp_path,
+                        height,
+                        width,
+                        channels,
+                        fps=fps,
+                        queue_size=2,
+                    )
                 writers[cam_key].append(color)
 
         def _sweep_stream_dir(self):
@@ -920,17 +931,29 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
         def save_video(self, env_idx, video_path, tag):
             writers = self.video_writers.pop(env_idx, {})
+            # Signal EOF for every camera before waiting for any one encoder.
+            # This lets the independent ffmpeg workers drain concurrently.
+            for writer in writers.values():
+                try:
+                    writer.request_close()
+                except Exception:
+                    pass
             for cam_key, writer in writers.items():
                 tmp_path = writer.out_path
                 final_path = video_path.replace(".mp4", f"_{cam_key}_{tag}.mp4")
                 try:
                     writer.close(announce=False)
+                    os.makedirs(os.path.dirname(final_path), exist_ok=True)
+                    os.replace(tmp_path, final_path)
                 except Exception as e:
                     print(f"[EvalEnv] Failed to finalize video for env {env_idx} cam {cam_key}: {e}")
                     writer.abort()
+                    try:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
                     continue
-                os.makedirs(os.path.dirname(final_path), exist_ok=True)
-                os.replace(tmp_path, final_path)
                 print(
                     format_video_saved_message(
                         final_path,
