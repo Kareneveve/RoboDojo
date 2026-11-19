@@ -9,6 +9,7 @@ import numpy as np
 from omegaconf import DictConfig
 import omni.usd
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+from scipy.spatial import ConvexHull, QhullError
 import torch
 
 from env.scene_manager.layout_manager import LayoutManager
@@ -180,6 +181,34 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
             obj_quat = torch.tensor(obj_orientation, dtype=torch.float32, device=device)[:4]
 
         return obj_pos, obj_quat, device
+
+    @property
+    def local_collision_vertices(self):
+        """Return collision mesh vertices in the scaled object frame."""
+        root = self.stage.GetPrimAtPath(self._prim_path)
+        xforms = UsdGeom.XformCache()
+        mesh_vertices = []
+        for prim in Usd.PrimRange(root, Usd.TraverseInstanceProxies()):
+            if not prim.IsA(UsdGeom.Mesh) or not prim.HasAPI(UsdPhysics.CollisionAPI):
+                continue
+            if not UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get():
+                continue
+            points = UsdGeom.Mesh(prim).GetPointsAttr().Get()
+            if not points:
+                continue
+            transform, _ = xforms.ComputeRelativeTransform(prim, root)
+            matrix = np.asarray(transform)
+            mesh_vertices.append(np.asarray(points) @ matrix[:3, :3] + matrix[3, :3])
+
+        if not mesh_vertices:
+            return np.empty((0, 3))
+
+        vertices = np.concatenate(mesh_vertices) * np.asarray(self.scale, dtype=float)
+        # Extrema along any axis are attained on the hull even as the object rotates.
+        try:
+            return vertices[ConvexHull(vertices).vertices]
+        except QhullError:
+            return vertices
 
     def _find_first_mesh_in_hierarchy(self, prim_path: str) -> str:
         start_prim = get_prim_at_path(prim_path)
