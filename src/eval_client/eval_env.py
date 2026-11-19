@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime
 import importlib
@@ -446,15 +447,17 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 control_seq = self.process_control_info(control_info, env_idx)
                 control_info_list.append(control_seq)
 
-            if len(control_info_list) > 0:
-                self.robot_manager.control_manager.push(env_idx_list, control_info_list)
-                while not self.have_empty(env_idx_list):
-                    self.step(env_idx_list=env_idx_list)
-                    if self.physx_monitor_enabled:
-                        self._check_physx_broken_envs()
-                        self._check_endpose_finite(env_idx_list)
+            reward_action = getattr(self, "_reward_action", nullcontext)
+            with reward_action(env_idx_list):
+                if len(control_info_list) > 0:
+                    self.robot_manager.control_manager.push(env_idx_list, control_info_list)
+                    while not self.have_empty(env_idx_list):
+                        self.step(env_idx_list=env_idx_list)
+                        if self.physx_monitor_enabled:
+                            self._check_physx_broken_envs()
+                            self._check_endpose_finite(env_idx_list)
 
-            self.reward_manager.step(env_idx_list=env_idx_list)
+                self.reward_manager.step(env_idx_list=env_idx_list)
             if getattr(self, "interact", False):
                 if hasattr(self, "query_support_arm_traj"):
                     for env_idx in env_idx_list:

