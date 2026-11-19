@@ -1,4 +1,4 @@
-"""Check that configured mass changes reach PhysX together with inertia.
+"""Check that configured mass changes reach USD and PhysX together with inertia.
 
 The experiment uses two identical one-unit cubes. The heavier cube has 3.5 times
 the mass, receives the same off-center force, and should therefore have 3.5 times
@@ -66,6 +66,14 @@ def create_rigid_object(stage, prim_path, mass, position):
     )
 
 
+def read_usd_state(stage, prim_path):
+    prim = stage.GetPrimAtPath(prim_path)
+    mass_api = UsdPhysics.MassAPI(prim)
+    mass = float(mass_api.GetMassAttr().Get())
+    diagonal_inertia = np.asarray(mass_api.GetDiagonalInertiaAttr().Get(), dtype=np.float32)
+    return mass, diagonal_inertia
+
+
 def read_runtime_state(rigid_object):
     mass = float(np.asarray(rigid_object._rigid_prim_view.get_masses()).reshape(-1)[0])
     inertia_matrix = np.asarray(rigid_object._rigid_prim_view.get_inertias()).reshape(-1, 9)[0].reshape(3, 3)
@@ -102,6 +110,12 @@ def main():
         world.step(render=False)
         simulation_app.update()
 
+        light_usd_mass, light_usd_inertia = read_usd_state(
+            stage, "/World/envs/env_0/rigid/inertia_test/light_0_100"
+        )
+        heavy_usd_mass, heavy_usd_inertia = read_usd_state(
+            stage, "/World/envs/env_0/rigid/inertia_test/heavy_0_100"
+        )
         light_mass, light_inertia, _ = read_runtime_state(light)
         heavy_mass, heavy_inertia, _ = read_runtime_state(heavy)
         light._rigid_prim_view.set_velocities(np.zeros((1, 6), dtype=np.float32))
@@ -125,14 +139,22 @@ def main():
 
         print(f"light_mass={light_mass:.7f}", flush=True)
         print(f"heavy_mass={heavy_mass:.7f}", flush=True)
+        print(f"light_usd_mass={light_usd_mass:.7f}", flush=True)
+        print(f"heavy_usd_mass={heavy_usd_mass:.7f}", flush=True)
         print(f"light_inertia={light_inertia.tolist()}", flush=True)
         print(f"heavy_inertia={heavy_inertia.tolist()}", flush=True)
+        print(f"light_usd_inertia={light_usd_inertia.tolist()}", flush=True)
+        print(f"heavy_usd_inertia={heavy_usd_inertia.tolist()}", flush=True)
         print(f"inertia_ratio={inertia_ratio.tolist()}", flush=True)
         print(f"light_angular_velocity_z={light_angular_velocity[2]:.7f}", flush=True)
         print(f"heavy_angular_velocity_z={heavy_angular_velocity[2]:.7f}", flush=True)
         print(f"angular_velocity_ratio={angular_velocity_ratio:.7f}", flush=True)
 
         np.testing.assert_allclose(heavy_mass / light_mass, MASS_RATIO, rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(light_usd_mass, light_mass, rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(heavy_usd_mass, heavy_mass, rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(light_usd_inertia, light_inertia, rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(heavy_usd_inertia, heavy_inertia, rtol=1e-4, atol=1e-5)
         np.testing.assert_allclose(inertia_ratio, np.full(3, MASS_RATIO), rtol=2e-3, atol=2e-3)
         np.testing.assert_allclose(angular_velocity_ratio, MASS_RATIO, rtol=5e-2, atol=5e-2)
         print("PASS: mass, inertia, and angular response scale consistently", flush=True)
