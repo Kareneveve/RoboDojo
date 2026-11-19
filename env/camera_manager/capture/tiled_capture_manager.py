@@ -51,11 +51,27 @@ class TiledCaptureManager:
         Initialize the capture manager.
         This method should be called before the simulation context is created.
         """
-        if len(self.cameras) == 0:
-            self.cameras = self.camera_manager.cameras
-            self.camera_names = self.camera_manager.camera_names
+        self.cameras = self.camera_manager.cameras
+        self.camera_names = self.camera_manager.camera_names
         self.num_cams = len(self.cameras[0])
         self.sim = sim
+
+    def _clear_tiled_cameras(self):
+        """Release render products and annotators before rebuilding capture."""
+        for tiled_camera in self.tiled_cameras:
+            if tiled_camera is None:
+                continue
+            try:
+                tiled_camera._clean_up_tiled_sensor()
+            except Exception:
+                pass
+        self.tiled_cameras.clear()
+        self.tiled_render_products.clear()
+        self.annotator.clear()
+        self.annotator_type.clear()
+        self.annotator_device.clear()
+        self._output_buffers.clear()
+        self.camera_prim_paths.clear()
 
     def init_cameras(self):
         """
@@ -64,7 +80,10 @@ class TiledCaptureManager:
         2. Get all render_product control
         3. Attach Annotator
         """
-        self.camera_prim_paths.clear()
+        self.cameras = self.camera_manager.cameras
+        self.camera_names = self.camera_manager.camera_names
+        self.num_cams = len(self.cameras[0])
+        self._clear_tiled_cameras()
         for env_id in range(self.num_envs):
             self.camera_prim_paths.append([])
             for camera in self.cameras[env_id]:
@@ -189,13 +208,7 @@ class TiledCaptureManager:
         This function will be called when we close the environment.
         """
 
-        self.annotator.clear()
-        self.annotator_type.clear()
-        self.annotator_device.clear()
-        self.tiled_cameras.clear()
+        self._clear_tiled_cameras()
         self.cameras.clear()
         self.camera_names.clear()
         self.sim = None
-        for rp in self.tiled_render_products:
-            rp.destroy()
-        self.camera_prim_paths.clear()
