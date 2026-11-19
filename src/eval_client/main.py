@@ -69,6 +69,8 @@ from env.global_configs import BENCHMARK, ROOT_DIR
 
 task_registry = importlib.import_module(f"task.{BENCHMARK}.task_registry")
 
+if args_cli.headless:
+    args_cli.video = True
 
 class PhysXBrokenError(Exception):
     pass

