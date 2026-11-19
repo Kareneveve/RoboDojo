@@ -479,8 +479,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             (deep copies of the input), then overwrites arm/gripper positions
             frame by frame:
 
-            - First 80% (floor) steps: linear interpolation from current state
-                to target state.
+            - First 80% (floor) steps: linear interpolation from the current
+                arm state or previously committed gripper command to the target.
             - Last 20% steps: hold the target state.
 
             Notes:
@@ -492,7 +492,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
             Args:
                     control_info: One-step target control dict for a single env.
-                    env_idx: Environment index used to read current robot states.
+                    env_idx: Environment index used to read robot state and the
+                        previously committed gripper command.
 
             Returns:
                     List[dict]: A control sequence of length `interpolation_nums`.
@@ -532,9 +533,14 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 key_name = self.robot_manager.process_name(robot.gripper_name)
                 if key_name in control_info.keys() and robot.ee_type == "gripper":
                     position = control_info[key_name]["position"][0]
-                    current_position = self.robot_manager.get_end_effector_real_val(robot, env_idx_list=[env_idx])[
-                        env_idx
-                    ][0]
+                    current_position = self.robot_manager.control_manager.get_last_commanded_gripper(
+                        env_idx, key_name
+                    )
+                    if current_position is None:
+                        measured_position = self.robot_manager.get_end_effector_real_val(
+                            robot, env_idx_list=[env_idx]
+                        )[env_idx]
+                        current_position = measured_position[0] if measured_position is not None else None
                     if current_position is not None:
                         interp_count = int(np.floor(interpolation_nums * 0.8))
 
