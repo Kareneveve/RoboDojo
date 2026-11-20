@@ -573,9 +573,9 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             and per-key dimensions for this robot.
 
             Args:
-                action_dict: action mapping returned by the policy. Single-arm
-                    robots use unprefixed keys (e.g. ``arm_joint_state``,
-                    ``ee_pose``); bi-manual robots use ``left_``/``right_`` prefixes.
+                action_dict: action mapping returned by the policy. For a
+                    single arm, use ``arm_joint_state`` or ``arm_ee_pose``.
+                    Dual-arm targets use ``left_`` and ``right_`` prefixes.
 
             Raises:
                 ValueError: unexpected keys, forbidden prefixes, or wrong dimensions.
@@ -595,7 +595,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 expected = {
                     "arm_joint_state": arm_dims[0],
                     "ee_joint_state": ee_dims[0],
-                    "ee_pose": 7,
+                    "arm_ee_pose": 7,
                     "tcp_pose": 7,
                     "delta_ee_pose": 7,
                 }

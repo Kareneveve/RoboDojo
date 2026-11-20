@@ -433,7 +433,7 @@ class LayoutManager:
                 pos = pos + env_pos
             return (pos, rot)
         elif instance_type in ["garment", "geometry"]:
-            state = obj.get_state(is_relative=True)
+            state = obj.get_state(is_relative=relative)
             root_pose = state["root_pose"].detach().cpu().numpy()
             pos = root_pose[:3]
             rot = root_pose[3:]
