@@ -1,5 +1,4 @@
 from collections.abc import Iterable, Mapping
-from copy import deepcopy
 import os
 from pathlib import Path
 import re
@@ -75,14 +74,12 @@ class SeedManager:
             self.idx += len(batch)
             self._current_batch_seeds = batch
             return batch
-        if self.idx + self.num_envs > self.ed_idx:
-            batch = self.seed_list[self.idx : self.ed_idx]
-            result = deepcopy(batch)
-            for _ in range(self.num_envs - len(result)):
-                batch.append(self.seed_list[self.ed_idx - 1])  # pad with last seed if not enough remaining
-        else:
-            batch = self.seed_list[self.idx : self.idx + self.num_envs]
-        self.idx += self.num_envs
+        batch = self.seed_list[self.idx : min(self.idx + self.num_envs, self.ed_idx)]
+        self.idx += len(batch)
+        if len(batch) < self.num_envs:
+            # None marks an inactive slot.  Reusing the last real layout here
+            # silently evaluates one layout twice and changes the denominator.
+            batch = batch + [None] * (self.num_envs - len(batch))
         self._current_batch_seeds = batch
         return batch
 

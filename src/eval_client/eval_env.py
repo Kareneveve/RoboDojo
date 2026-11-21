@@ -1,10 +1,9 @@
-from contextlib import nullcontext
 from copy import deepcopy
-from datetime import datetime
 import importlib
 import inspect
 import json
 import os
+from pathlib import Path
 
 from client_server.ws.model_client import WsModelClient
 import numpy as np
@@ -15,7 +14,11 @@ from env.global_configs import *
 from env.global_configs import BENCHMARK
 from env.observation_manager.obs_manager import ObsManager
 from env.seed_manager.seed_manager import SeedManager
-from utils.cluttered_generator import UnStableError
+from src.eval_client.path_utils import (
+    make_run_id,
+    safe_path_component,
+    validate_resume_save_dir,
+)
 from utils.pipeline_utils import get_robot_action_dim_info
 from utils.save_file import VideoStreamWriter, format_video_saved_message, save_json
 
@@ -75,23 +78,43 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
             run_id = os.environ.get("ROBODOJO_RUN_ID")
             if not run_id:
-                run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                run_id = make_run_id()
                 os.environ["ROBODOJO_RUN_ID"] = run_id
+            run_id = safe_path_component(run_id, "ROBODOJO_RUN_ID")
             self.run_id = run_id
+            safe_task_name = safe_path_component(self.task_name, "task_name")
+            safe_policy_name = safe_path_component(self.policy_name, "policy_name")
+            safe_config_name = safe_path_component(self.config_name, "config_name")
+            safe_additional_info = safe_path_component(
+                self.additional_info,
+                "additional_info",
+                allow_empty=True,
+            )
+            eval_seed_component = safe_path_component(
+                f"{self.eval_seed}_{safe_additional_info}", "eval seed"
+            )
+            expected_parent = Path(
+                "eval_result",
+                f"{BENCHMARK}",
+                safe_task_name,
+                safe_policy_name,
+                safe_config_name,
+                eval_seed_component,
+            )
             self.save_dir = os.path.join(
                 "eval_result",
                 f"{BENCHMARK}",
-                self.task_name,
-                self.policy_name,
-                self.config_name,
-                str(self.eval_seed) + "_" + self.additional_info,
+                safe_task_name,
+                safe_policy_name,
+                safe_config_name,
+                eval_seed_component,
                 run_id,
             )
 
             if resume_state is not None:
                 resumed_save_dir = resume_state.get("save_dir")
                 if resumed_save_dir:
-                    self.save_dir = resumed_save_dir
+                    self.save_dir = str(validate_resume_save_dir(resumed_save_dir, expected_parent))
 
             # Temp dir for in-progress streaming videos. Orphans left behind by
             # a hard kill (SIGKILL/crash) can't be cleaned via the in-memory
@@ -133,6 +156,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 "eval_time": 0,
                 "score": 0.0,
                 "details": {},
+                "rdv_abandoned_layouts": [],
             }
 
             self.scene_manager.layout_manager.replay = True
@@ -199,7 +223,6 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
         def close(self):
             self._abort_video_writers()
-            self.obs_manager.reset()
             super().close()
 
         def _post_setup_scene(self, sim):
@@ -207,7 +230,18 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             self.obs_manager.initialize(self)
 
         def reset(self, seed=None, options=None):
-            seed = list(seed)
+            if seed is None:
+                seed = self.env_seeds
+                if seed is None:
+                    seed = self.seed_manager.get_seeds(max_count=self.num_envs)
+                seed = [] if seed is None else list(seed)
+            elif isinstance(seed, (int, np.integer)):
+                seed = [int(seed)]
+            else:
+                try:
+                    seed = list(seed)
+                except TypeError as exc:
+                    raise TypeError("seed must be None, an integer, or a sequence of integers") from exc
             if len(seed) < self.num_envs:
                 seed = seed + [None] * (self.num_envs - len(seed))
 
@@ -244,16 +278,21 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             self.reward_manager.init_state()
 
             self.model_client.call(func_name="reset")
+            active_envs = [idx for idx in range(self.num_envs) if not self.end_flag[idx]]
+            return self.get_obs_batch(env_idx_list=active_envs), {}
 
         def setup_scene(self):
             self.scene_manager.apply_saved_poses(env_idx_list=list(range(self.num_envs)))
             self._align_layout_success()
             success, unstable_envs = self.scene_manager.layout_manager.check_layout_stability(self)
             unstable_envs = [idx for idx in set(unstable_envs) if idx < self.num_envs]
+            if not success and not unstable_envs:
+                unstable_envs = [idx for idx in self.current_env_seed_map if not self.end_flag[idx]]
             self.unstable_nums += len(unstable_envs)
-            self.episode_nums -= len(unstable_envs)
-            if not success or self.episode_nums <= 0:
-                raise UnStableError("All scene Unstable Error!")
+            self.unstable_envs.update(unstable_envs)
+            for env_idx in unstable_envs:
+                self.success[env_idx] = False
+                self.end_flag[env_idx] = True
             for _ in range(10):
                 self.render()
             for idx in range(200):
@@ -360,8 +399,13 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             if self.physx_monitor_enabled:
                 self._check_physx_broken_envs()
             control_info_list = []
+            action_env_idx_list = []
             if env_idx_list is None:
                 env_idx_list = list(range(self.num_envs))
+            if len(actions_list) != len(env_idx_list):
+                raise ValueError(
+                    f"actions_list length {len(actions_list)} does not match env_idx_list length {len(env_idx_list)}"
+                )
             for idx, env_idx in enumerate(env_idx_list):
                 action = actions_list[idx]
                 self.validate_action_dict(action)
@@ -446,33 +490,30 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                             pass
                 control_seq = self.process_control_info(control_info, env_idx)
                 control_info_list.append(control_seq)
+                action_env_idx_list.append(env_idx)
 
-            reward_action = getattr(self, "_reward_action", nullcontext)
-            with reward_action(env_idx_list):
+            with self.reward_action_context(action_env_idx_list):
                 if len(control_info_list) > 0:
-                    self.robot_manager.control_manager.push(env_idx_list, control_info_list)
-                    while not self.have_empty(env_idx_list):
-                        self.step(env_idx_list=env_idx_list)
+                    self.robot_manager.control_manager.push(action_env_idx_list, control_info_list)
+                    while not self.have_empty(action_env_idx_list):
+                        self.step(env_idx_list=action_env_idx_list)
                         if self.physx_monitor_enabled:
                             self._check_physx_broken_envs()
-                            self._check_endpose_finite(env_idx_list)
+                            self._check_endpose_finite(action_env_idx_list)
 
-                self.reward_manager.step(env_idx_list=env_idx_list)
+                if action_env_idx_list:
+                    self.reward_manager.step(env_idx_list=action_env_idx_list)
             if getattr(self, "interact", False):
                 if hasattr(self, "query_support_arm_traj"):
-                    for env_idx in env_idx_list:
+                    for env_idx in action_env_idx_list:
                         self.query_support_arm_traj(env_idx=env_idx)
                 if hasattr(self, "check_support_arm_stable"):
-                    for env_idx in env_idx_list:
+                    for env_idx in action_env_idx_list:
                         self.check_support_arm_stable(env_idx=env_idx)
             self.is_episode_end()
 
         def mark_env_unstable(self, env_idx):
-            """Flag an env as unstable so run_eval drops it from the eval set.
-
-            Unstable envs produce no fail video and are not counted toward the
-            eval total (they are accounted under ``unstable_nums`` instead).
-            """
+            """Flag an env as unstable so it is recorded as a failed sample."""
             self.unstable_envs.add(env_idx)
 
         def process_control_info(self, control_info, env_idx):
@@ -589,52 +630,53 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     f"robot_action_dim_info mismatch: len(arm_dim)={len(arm_dims)} != len(ee_dim)={len(ee_dims)}"
                 )
 
-            arm_count = len(arm_dims)
+            target_robots = [robot for robot in self.robot_manager.robot_list if robot.type == "target"]
+            if len(target_robots) != len(arm_dims):
+                raise ValueError(
+                    f"robot/action mismatch: {len(target_robots)} target arms but {len(arm_dims)} configured arms"
+                )
 
-            if arm_count == 1:
-                expected = {
-                    "arm_joint_state": arm_dims[0],
-                    "ee_joint_state": ee_dims[0],
-                    "arm_ee_pose": 7,
-                    "tcp_pose": 7,
-                    "delta_ee_pose": 7,
-                }
-                forbidden_prefixes = ("left_", "right_")
+            expected = {}
+            joint_keys = []
+            ee_keys = []
+            for index, robot in enumerate(target_robots):
+                arm_key = self.robot_manager.process_name(robot.arm_name)
+                gripper_key = self.robot_manager.process_name(robot.gripper_name)
+                pose_key = f"{robot.arm_name.split('_')[0]}_ee_pose"
+                expected.update({arm_key: arm_dims[index], gripper_key: ee_dims[index], pose_key: 7})
+                joint_keys.extend((arm_key, gripper_key))
+                ee_keys.extend((pose_key, gripper_key))
 
-            elif arm_count == 2:
-                expected = {
-                    "left_arm_joint_state": arm_dims[0],
-                    "left_ee_joint_state": ee_dims[0],
-                    "left_ee_pose": 7,
-                    "left_tcp_pose": 7,
-                    "left_delta_ee_pose": 7,
-                    "right_arm_joint_state": arm_dims[1],
-                    "right_ee_joint_state": ee_dims[1],
-                    "right_ee_pose": 7,
-                    "right_tcp_pose": 7,
-                    "right_delta_ee_pose": 7,
-                }
-                forbidden_prefixes = ()
-            else:
-                raise ValueError(f"Unsupported arm count: {arm_count}")
-
-            if forbidden_prefixes:
-                bad_prefixed_keys = [k for k in action_dict.keys() if k.startswith(forbidden_prefixes)]
-                if bad_prefixed_keys:
-                    raise ValueError(f"Single-arm robot should not contain prefixed keys, but got: {bad_prefixed_keys}")
             unexpected_keys = [k for k in action_dict if k not in expected]
             if unexpected_keys:
                 raise ValueError(f"Unexpected state keys: {unexpected_keys}")
 
+            has_joint = any(key in action_dict for key in joint_keys[::2])
+            has_ee = any(key in action_dict for key in ee_keys[::2])
+            if has_joint and has_ee:
+                raise ValueError("Action cannot mix joint-state and end-effector pose keys")
+            required_keys = joint_keys if has_joint else ee_keys if has_ee else []
+            if not required_keys:
+                raise ValueError("Action must contain a complete joint-state or end-effector-pose command")
+            missing_keys = [key for key in required_keys if key not in action_dict]
+            if missing_keys:
+                raise ValueError(f"Action is missing required keys: {missing_keys}")
+            extra_keys = [key for key in action_dict if key not in required_keys]
+            if extra_keys:
+                raise ValueError(f"Action mixes unsupported keys for this action type: {extra_keys}")
+
             for key, expected_dim in expected.items():
-                if key not in action_dict.keys():
+                if key not in required_keys:
                     continue
                 value = action_dict[key]
 
                 if not isinstance(value, (np.ndarray, list, tuple)):
                     raise TypeError(f"action_dict['{key}'] must be array-like, got {type(value)}")
 
-                arr = np.asarray(value)
+                try:
+                    arr = np.asarray(value, dtype=float)
+                except (TypeError, ValueError) as exc:
+                    raise TypeError(f"action_dict['{key}'] must contain numeric values") from exc
 
                 if arr.ndim != 1:
                     raise ValueError(f"action_dict['{key}'] must be 1D, got shape {arr.shape}")
@@ -643,6 +685,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     raise ValueError(
                         f"action_dict['{key}'] dim mismatch: expected {expected_dim}, got shape {arr.shape}"
                     )
+                if not np.isfinite(arr).all():
+                    raise ValueError(f"action_dict['{key}'] must contain only finite values")
 
         def step(self, env_idx_list, decimation=1):
             meta_control_list = self.robot_manager.control_manager.pop(env_idx_list)
@@ -657,7 +701,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 if not self.scene_manager.layout_manager.layout_valid[env_idx]:
                     self.success[env_idx] = False
                     self.end_flag[env_idx] = True
-                    self.episode_nums -= 1
+                    self.unstable_envs.add(env_idx)
 
         def resume_manifest_path(self) -> str:
             """Stable-but-run-id-tagged path for the resume manifest.
@@ -667,13 +711,22 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             never overwrite each other's manifest while still being easy to
             locate by humans.
             """
+            safe_task_name = safe_path_component(self.task_name, "task_name")
+            safe_policy_name = safe_path_component(self.policy_name, "policy_name")
+            safe_config_name = safe_path_component(self.config_name, "config_name")
+            safe_additional_info = safe_path_component(
+                self.additional_info, "additional_info", allow_empty=True
+            )
+            eval_seed_component = safe_path_component(
+                f"{self.eval_seed}_{safe_additional_info}", "eval seed"
+            )
             return os.path.join(
                 "eval_result",
                 f"{BENCHMARK}",
-                self.task_name,
-                self.policy_name,
-                self.config_name,
-                str(self.eval_seed) + "_" + self.additional_info,
+                safe_task_name,
+                safe_policy_name,
+                safe_config_name,
+                eval_seed_component,
                 f"_resume_{self.run_id}.json",
             )
 
@@ -687,6 +740,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             """
             manifest_path = self.resume_manifest_path()
             os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+            self.eval_result["rdv_abandoned_layouts"] = sorted(int(s) for s in self.abandoned_seeds)
             completed_layout_ids = sorted(
                 {
                     int(v["layout_id"])
@@ -746,8 +800,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             This method recomputes the exact 3x3 that get_delta_endpose is
             about to hand to mat2quat and verifies np.isfinite on it. Any env
             that fails the check is treated as PhysX-broken and we raise
-            PhysXBrokenError so main.py's existing recovery path (abandon
-            seed -> refill from queue -> retry round) fires.
+            PhysXBrokenError so main.py records that layout as a failed sample
+            and retries only the healthy envs in the batch.
             """
             if not self.physx_monitor_enabled:
                 return
@@ -781,36 +835,44 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             self.run_reward()
             if hasattr(self, "get_score"):
                 self.get_score()
+            batch_envs = list(self.current_env_seed_map)
             exist_envs = self.get_running_env_idx_list()
-            if getattr(self, "interact", False):
-                if hasattr(self, "query_support_arm_traj"):
-                    for env_idx in exist_envs:
-                        self.query_support_arm_traj(env_idx=env_idx)
-            if self.eval_batch:
-                self.eval_one_episode_batch()
-            else:
-                self.eval_one_episode()
+            if exist_envs:
+                if getattr(self, "interact", False):
+                    if hasattr(self, "query_support_arm_traj"):
+                        for env_idx in exist_envs:
+                            self.query_support_arm_traj(env_idx=env_idx)
+                if self.eval_batch:
+                    self.eval_one_episode_batch()
+                else:
+                    self.eval_one_episode()
+            # A policy is allowed to return without calling take_action_batch.
+            # Force the task's terminal checks here so the initial success
+            # sentinel cannot turn an immediate quit into a 100-point episode.
+            active_after_policy = [env_idx for env_idx in exist_envs if not self.end_flag[env_idx]]
+            if active_after_policy:
+                final_rewards = self.reward_manager.get_reward(
+                    final_check=True, env_idx_list=active_after_policy
+                )
+                for env_idx in active_after_policy:
+                    self.end_flag[env_idx] = True
+                    self.success[env_idx] = final_rewards[env_idx] > 1 - 1e-3
             success = 0
             process_scores = self.reward_manager.get_score() if hasattr(self, "get_score") else None
-            # Envs flagged unstable during the episode (e.g. make_kong's
-            # support-arm discard failed to knock the target tile down) are not
-            # valid eval samples: skip their videos and exclude them from the
-            # eval total, accounting them under unstable_nums instead.
-            unstable_in_batch = [e for e in exist_envs if e in self.unstable_envs]
-            if unstable_in_batch:
-                self.unstable_nums += len(unstable_in_batch)
-                self.episode_nums -= len(unstable_in_batch)
-            eval_envs = [e for e in exist_envs if e not in self.unstable_envs]
-            for idx, env_idx in enumerate(eval_envs):
-                index = idx + self.success_nums + self.fail_nums
+            recorded = 0
+            for env_idx in batch_envs:
+                index = self.success_nums + self.fail_nums + recorded
                 episode_score = 0.0
                 tag = "fail"
+                is_unstable = env_idx in self.unstable_envs
+                if is_unstable:
+                    self.success[env_idx] = False
                 if self.success[env_idx]:
                     self.total_score += 1.0
                     episode_score = 1.0
                     success += 1
                     tag = "success"
-                elif process_scores is not None:
+                elif process_scores is not None and not is_unstable:
                     episode_score = process_scores[env_idx] / 100.0
                     self.total_score += episode_score
 
@@ -824,13 +886,15 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     "success": bool(self.success[env_idx]),
                     "score": episode_score,
                 }
-                video_path = os.path.join(self.save_dir, f"episode_{index:07d}.mp4")
-                self.save_video(env_idx, video_path, tag)
+                if env_idx not in self.unstable_envs:
+                    video_path = os.path.join(self.save_dir, f"episode_{index:07d}.mp4")
+                    self.save_video(env_idx, video_path, tag)
+                recorded += 1
 
             # Drop streams for envs not saved this batch (e.g. unstable ones).
             self._abort_video_writers()
 
-            fail = self.episode_nums - success
+            fail = recorded - success
             self.success_nums += success
             self.fail_nums += fail
             eval_time = self.success_nums + self.fail_nums
@@ -847,16 +911,55 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             except Exception as e:
                 print(f"[EvalEnv] persist_resume_manifest after run_eval failed: {e}")
 
+        def record_batch_failure(self, error: Exception, env_idxs=None) -> None:
+            """Count a non-PhysX batch exception as failed eval samples."""
+            selected = None if env_idxs is None else set(int(idx) for idx in env_idxs)
+            failed_envs = []
+            for env_idx, seed in self.current_env_seed_map.items():
+                if selected is not None and env_idx not in selected:
+                    continue
+                failed_envs.append((env_idx, seed))
+
+            reason = f"{type(error).__name__}: {error}"[:500]
+            start_index = self.success_nums + self.fail_nums
+            for offset, (env_idx, seed) in enumerate(failed_envs):
+                self.success[env_idx] = False
+                self.end_flag[env_idx] = True
+                self.eval_result["details"][start_index + offset] = {
+                    "layout_id": int(seed),
+                    "success": False,
+                    "score": 0.0,
+                    "error": reason,
+                }
+
+            self.fail_nums += len(failed_envs)
+            self.episode_nums = max(0, self.episode_nums - len(failed_envs))
+            self._abort_video_writers()
+            eval_time = self.success_nums + self.fail_nums
+            self.eval_result["eval_time"] = eval_time
+            self.eval_result["success_rate"] = self.success_nums / eval_time if eval_time else 0.0
+            self.eval_result["score"] = self.total_score / eval_time * 100 if eval_time else 0.0
+            save_json(self.eval_result, os.path.join(self.save_dir, "_result.json"))
+            try:
+                self.persist_resume_manifest()
+            except Exception as persist_error:
+                print(f"[EvalEnv] persist_resume_manifest after batch failure failed: {persist_error}")
+
         def is_episode_end(self):
             pre_end_flag = deepcopy(self.end_flag)
-            final_check = False
-            for env_idx in range(self.num_envs):
-                if self.take_action_cnt[env_idx] >= self.step_lim or (
-                    not self.success[env_idx] and not self.end_flag[env_idx]
-                ):
-                    final_check = True
-                    break
-            reward_list = self.reward_manager.get_reward(final_check=final_check)
+            active_envs = [env_idx for env_idx in range(self.num_envs) if not self.end_flag[env_idx]]
+            final_envs = [
+                env_idx
+                for env_idx in active_envs
+                if self.take_action_cnt[env_idx] >= self.step_lim or not self.success[env_idx]
+            ]
+            reward_list = self.reward_manager.get_reward(final_check=False, env_idx_list=active_envs)
+            if final_envs:
+                final_reward_list = self.reward_manager.get_reward(
+                    final_check=True, env_idx_list=final_envs
+                )
+                for env_idx in final_envs:
+                    reward_list[env_idx] = final_reward_list[env_idx]
             for env_idx in range(self.num_envs):
                 if self.end_flag[env_idx]:
                     continue

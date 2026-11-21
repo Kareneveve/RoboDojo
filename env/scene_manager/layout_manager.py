@@ -159,14 +159,20 @@ class LayoutManager:
                 for cat, inst_list in value.items():
                     for inst in inst_list:
                         cat_idx = inst.get("category_idx", None)
-                        prim_path, inst_name = self._generate_object_paths(env_idx, cat, cat_idx, type=key.lower())
-                        if key in ["Rigid", "Dynamic", "Garment", "Articulation", "Geometry", "Fluid"]:
-                            if "type" in inst and inst["type"] == "cluttered":
-                                usd_path = f"{OBJECTS_PATH}/Clutter/{cat}/{cat_idx:05d}/object.usdz"
-                            else:
-                                usd_path = f"{OBJECTS_PATH}/{key}/{cat}/{cat_idx:05d}/object.usdz"
-                            if not os.path.exists(usd_path):
-                                usd_path = f"{OBJECTS_PATH}/{key}/{cat}/{cat_idx:05d}/object.usd"
+                        if "type" in inst and inst["type"] == "cluttered":
+                            usd_path = f"{OBJECTS_PATH}/Clutter/{cat}/{cat_idx:05d}/object.usdz"
+                        else:
+                            usd_path = f"{OBJECTS_PATH}/{key}/{cat}/{cat_idx:05d}/object.usdz"
+                        if not os.path.exists(usd_path):
+                            usd_path = f"{OBJECTS_PATH}/{key}/{cat}/{cat_idx:05d}/object.usd"
+                        # Objects that persist across reloads (e.g. rigid bodies
+                        # on CUDA) keep their prim; reuse its name so layout
+                        # records keep resolving to the live scene object.
+                        reused = self._claim_persistent_object(env_idx, key.lower(), cat, cat_idx, usd_path)
+                        if reused is not None:
+                            prim_path, inst_name = reused
+                        else:
+                            prim_path, inst_name = self._generate_object_paths(env_idx, cat, cat_idx, type=key.lower())
                         if "visual" in inst:
                             visual_cfg = inst.get("visual")
                             if isinstance(visual_cfg, DictConfig):
@@ -192,6 +198,28 @@ class LayoutManager:
                         info = load_desc_info(modeldir, cat_idx, key)
                         if info is not None:
                             data.update(info)
+                        # Articulation metadata carries the physical mass and
+                        # reset flags used by the simulator.  Keep explicit
+                        # values in a saved layout authoritative, while
+                        # filling omitted fields from the asset metadata so
+                        # the runtime object sees the same contract as the
+                        # evaluator and reward manager.
+                        if key == "Articulation" and isinstance(data.get("physics"), ABCMapping):
+                            physics_cfg = inst.get("physics")
+                            if isinstance(physics_cfg, ABCMapping):
+                                physics_cfg = dict(physics_cfg)
+                            else:
+                                physics_cfg = {}
+                            for field in (
+                                "mass",
+                                "fixed_base",
+                                "reset_drive",
+                            ):
+                                if (field not in physics_cfg or physics_cfg.get(field) is None) and field in data[
+                                    "physics"
+                                ]:
+                                    physics_cfg[field] = deepcopy(data["physics"][field])
+                            inst["physics"] = physics_cfg
                         self.object_records_by_type[key].add_instance(env_idx, inst, data)
                         self.instance_type_by_env[env_idx][inst_name] = key.lower()
             elif key == "Room":
@@ -273,7 +301,9 @@ class LayoutManager:
         usd_path = os.path.join(room_dir, usd_files[0])
         if not usd_path:
             raise ValueError(f"env_id {env_idx} room category {cat_name} missing 'usd_path' field.")
-        prim_path, inst_name = self._generate_object_paths(env_idx, cat_name, len(self.rooms[env_idx]), type="Rooms")
+        # Keep the prim namespace aligned with SceneManager.delete_fixture_prims,
+        # which removes the fixture at ``<env>/Room`` during a reload.
+        prim_path, inst_name = self._generate_object_paths(env_idx, cat_name, len(self.rooms[env_idx]), type="Room")
         self.rooms[env_idx].append(inst_name)
         self.instance_type_by_env[env_idx][inst_name] = "room"
         if "random" in room_cfg:
@@ -426,18 +456,28 @@ class LayoutManager:
             return (None, None)
         instance_type = self.instance_type_by_env[env_idx].get(inst_name, None)
         obj = self.get_scene_object(env_idx, inst_name)
+        if obj is None:
+            return (None, None)
         if instance_type in ["rigid", "articulation"]:
             pos, rot, device = obj._get_object_transform()
             if not relative:
                 env_pos = deepcopy(self.scene_manager.env_origins[env_idx]).to(device)
                 pos = pos + env_pos
-            return (pos, rot)
+            if isinstance(pos, torch.Tensor):
+                pos = pos.detach().cpu().numpy()
+            if isinstance(rot, torch.Tensor):
+                rot = rot.detach().cpu().numpy()
+            return (
+                np.asarray(pos, dtype=np.float32).reshape(-1)[:3],
+                np.asarray(rot, dtype=np.float32).reshape(-1)[:4],
+            )
         elif instance_type in ["garment", "geometry"]:
             state = obj.get_state(is_relative=relative)
             root_pose = state["root_pose"].detach().cpu().numpy()
             pos = root_pose[:3]
             rot = root_pose[3:]
             return (pos, rot)
+        return (None, None)
 
     def get_label_descriptions(self, env_idx, label=None, inst_name=None):
         metadata = self.get_instance_metadata(env_idx=env_idx, label=label, inst_name=inst_name)
@@ -560,7 +600,7 @@ class LayoutManager:
                     return None
                 if default_pos is None or default_ori is None:
                     default_pos, default_ori = self.get_instance_pose(inst_name=obj_name, env_idx=env_idx)
-                if base_link is not None and Path(usd_path).exists():
+                if base_link is not None and usd_path and Path(usd_path).exists():
                     root_matrix = self.to_transformation_matrix(default_pos, default_ori)
                     link_local_matrix = _get_link_matrix_from_usd(usd_path, base_link)
                     ref_matrix = root_matrix @ link_local_matrix
@@ -589,7 +629,8 @@ class LayoutManager:
                 for obj in self.object_records_by_type[object_type].layout_records_by_env[env_idx]:
                     check = True
                     relative_plane = obj.get("relative_plane", None)
-                    relative_plane = relative_plane.split("/")[0]
+                    if isinstance(relative_plane, str):
+                        relative_plane = relative_plane.split("/")[0]
                     if not obj.get("need_check_stable", True):
                         check = False
                     if relative_plane is not None and relative_plane not in ["table", "ground"]:
@@ -617,7 +658,7 @@ class LayoutManager:
                 rot = rot.cpu().numpy().flatten()
             return (pos, rot)
 
-        def is_stable(prev_pos, prev_rot, cur_pos, cur_rot, angle=5, eps=0.04):
+        def is_stable(env_idx, prev_pos, prev_rot, cur_pos, cur_rot, angle=5, eps=0.04):
             if rot_diff(prev_rot, cur_rot) > angle:
                 return False
             delta = np.abs(cur_pos - prev_pos)
@@ -645,7 +686,9 @@ class LayoutManager:
                     if step == 0:
                         first_pose[env_idx][actor] = (pos, rot)
                         continue
-                    if not is_stable(first_pose[env_idx][actor][0], first_pose[env_idx][actor][1], pos, rot, angle=30):
+                    if not is_stable(
+                        env_idx, first_pose[env_idx][actor][0], first_pose[env_idx][actor][1], pos, rot, angle=30
+                    ):
                         stable[env_idx].remove(actor)
                         unstable[env_idx].append(actor)
                     history_pose[env_idx][actor].append((pos, rot))
@@ -656,7 +699,7 @@ class LayoutManager:
                     for actor in list(stable[env_idx]):
                         prev_pos, prev_rot = history_pose[env_idx][actor][maxstep - window - 1]
                         cur_pos, cur_rot = history_pose[env_idx][actor][-1]
-                        if not is_stable(prev_pos, prev_rot, cur_pos, cur_rot, angle=10):
+                        if not is_stable(env_idx, prev_pos, prev_rot, cur_pos, cur_rot, angle=10):
                             stable[env_idx].remove(actor)
                             unstable[env_idx].append(actor)
                             unstable_envs.append(env_idx)
@@ -821,6 +864,17 @@ class LayoutManager:
         if not os.path.exists(usd_path):
             usd_path = os.path.join(object_dir, "object.usd")
         return usd_path
+
+    def _claim_persistent_object(self, env_idx: int, type: str, cat_name: str, model_idx: int, usd_path: str):
+        """Ask the scene manager for a live object of the same asset to reuse.
+
+        Returns ``(prim_path, inst_name)`` or ``None`` when nothing can be reused
+        (for example during offline layout generation without a scene).
+        """
+        claim = getattr(getattr(self, "scene_manager", None), "claim_parked_object", None)
+        if not callable(claim):
+            return None
+        return claim(env_idx, type, cat_name, model_idx, usd_path)
 
     def _generate_object_paths(self, env_idx: int, cat_name: str, model_idx: int, type: str) -> tuple[str, str]:
         """Generate sequential prim path and instance name for a category.

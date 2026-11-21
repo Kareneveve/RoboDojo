@@ -13,7 +13,7 @@ from omegaconf import DictConfig
 import omni.kit.commands
 import omni.physx.scripts.utils as physx_utils
 import omni.usd
-from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 import torch
 
 
@@ -71,6 +71,8 @@ class ArticulationObject(SingleArticulation):
         self.init_scale = scale
         if self.physics_cfg.get("fixed_base", False):
             self.fix_root_link()
+        self._configured_total_mass = self._read_configured_total_mass()
+        self._apply_configured_mass_to_usd()
         super().__init__(
             prim_path=self._prim_path,
             name=self.prim_name,
@@ -78,6 +80,7 @@ class ArticulationObject(SingleArticulation):
             orientation=self.default_ori,
             scale=self.init_scale,
         )
+        self.color_material_path = None
         self._current_color = self.visual_cfg.get("color", None)
         if self._current_color is not None:
             self._apply_color_material(self._current_color)
@@ -90,6 +93,52 @@ class ArticulationObject(SingleArticulation):
             imageable = UsdGeom.Imageable(self.prim)
             if imageable:
                 imageable.MakeInvisible()
+
+    def _read_configured_total_mass(self):
+        """Return the configured articulation mass when it is finite and positive."""
+        value = self.physics_cfg.get("mass")
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(value) or value <= 0.0:
+            return None
+        return value
+
+    def _mass_api_prims(self):
+        root_prim = self.stage.GetPrimAtPath(self._prim_path)
+        if not root_prim or not root_prim.IsValid():
+            return []
+        result = []
+        for prim in Usd.PrimRange(root_prim):
+            if prim.HasAPI(UsdPhysics.MassAPI):
+                result.append(prim)
+        return result
+
+    def _apply_configured_mass_to_usd(self):
+        """Scale authored link masses and inertias to the metadata total mass."""
+        target_mass = self._configured_total_mass
+        if target_mass is None:
+            return
+        mass_entries = []
+        for prim in self._mass_api_prims():
+            mass_api = UsdPhysics.MassAPI(prim)
+            mass_attr = mass_api.GetMassAttr()
+            authored_mass = mass_attr.Get()
+            if authored_mass is None or float(authored_mass) <= 0.0:
+                continue
+            mass_entries.append((mass_api, float(authored_mass)))
+        total_mass = sum(mass for _, mass in mass_entries)
+        if total_mass <= 0.0:
+            return
+        scale = target_mass / total_mass
+        for mass_api, authored_mass in mass_entries:
+            mass_api.CreateMassAttr().Set(authored_mass * scale)
+            inertia_attr = mass_api.GetDiagonalInertiaAttr()
+            authored_inertia = inertia_attr.Get()
+            if authored_inertia is not None:
+                scaled_inertia = np.asarray(authored_inertia, dtype=np.float32) * scale
+                inertia_attr.Set(Gf.Vec3f(*scaled_inertia.tolist()))
 
     def _apply_default_velocities(self):
         """Re-apply default linear/angular velocity if configured."""
@@ -232,6 +281,7 @@ class ArticulationObject(SingleArticulation):
     def initialize(self):
         self.physics_sim_view = SimulationManager.get_physics_sim_view()
         super().initialize(physics_sim_view=self.physics_sim_view)
+        self._apply_configured_mass_to_runtime()
         self.upper_joint_positions = self.dof_properties["upper"].copy()
         self.lower_joint_positions = self.dof_properties["lower"].copy()
         self.initial_joint_positions = self.get_current_joint_positions()
@@ -252,6 +302,37 @@ class ArticulationObject(SingleArticulation):
                 ).copy()
         self.app = omni.kit.app.get_app()
         self.app.update()
+
+    def _apply_configured_mass_to_runtime(self):
+        """Apply and verify the metadata total mass after PhysX handles exist."""
+        target_mass = self._configured_total_mass
+        articulation_view = getattr(self, "_articulation_view", None)
+        if target_mass is None or articulation_view is None:
+            return
+        masses = articulation_view.get_body_masses()
+        if masses is None:
+            raise RuntimeError(f"Unable to read PhysX link masses for articulation {self._prim_path}")
+        if hasattr(masses, "detach"):
+            masses = masses.detach().cpu().numpy()
+        masses_np = np.asarray(masses, dtype=np.float64)
+        if masses_np.ndim == 1:
+            masses_np = masses_np.reshape(1, -1)
+        total_mass = float(masses_np[0].sum())
+        if not np.isfinite(total_mass) or total_mass <= 0.0:
+            raise RuntimeError(f"Invalid PhysX link masses for articulation {self._prim_path}: {masses_np}")
+        masses_np[0] *= target_mass / total_mass
+        articulation_view.set_body_masses(masses_np)
+        readback = articulation_view.get_body_masses()
+        if readback is None:
+            raise RuntimeError(f"Unable to read back PhysX link masses for articulation {self._prim_path}")
+        if hasattr(readback, "detach"):
+            readback = readback.detach().cpu().numpy()
+        readback_np = np.asarray(readback, dtype=np.float64)
+        readback_total = float(readback_np[0].sum())
+        if not np.isfinite(readback_total) or not np.isclose(readback_total, target_mass, rtol=1e-3, atol=1e-5):
+            raise RuntimeError(
+                f"PhysX mass readback mismatch for {self._prim_path}: expected {target_mass}, got {readback_total}"
+            )
 
     def get_current_joint_positions(self):
         return self.get_joint_positions()
@@ -364,7 +445,13 @@ class ArticulationObject(SingleArticulation):
 
     def get_link_pose(self, link_name: str):
         """
-        Get world pose of a specific link frame by recursively searching prim name.
+        Get the current world pose of a link, preferring the PhysX tensor view.
+
+        USD xforms can remain at their authored pose when Kit is running
+        headless without rendering.  Reward checks for moving articulation
+        links therefore need the kinematic state published by PhysX.  The USD
+        transform remains a fallback for calls made before articulation
+        initialization or when the tensor backend cannot expose the link.
 
         Args:
             link_name (str): link name, e.g. "panda_hand"
@@ -373,6 +460,41 @@ class ArticulationObject(SingleArticulation):
             np.ndarray:
                 shape (7,), format [x, y, z, qw, qx, qy, qz]
         """
+        articulation_view = getattr(self, "_articulation_view", None)
+        physics_view = getattr(articulation_view, "_physics_view", None)
+        if physics_view is not None:
+            try:
+                sim_view = getattr(self, "physics_sim_view", None)
+                update_kinematic = getattr(sim_view, "update_articulations_kinematic", None)
+                if callable(update_kinematic):
+                    update_kinematic()
+                link_index = articulation_view.get_link_index(link_name)
+                transforms = physics_view.get_link_transforms()
+                if hasattr(transforms, "detach"):
+                    transforms = transforms.detach().cpu().numpy()
+                transforms = np.asarray(transforms, dtype=np.float32)
+                if transforms.ndim == 2:
+                    transforms = transforms.reshape(1, transforms.shape[0], transforms.shape[1])
+                transform = transforms[0, int(link_index)]
+                if transform.shape[0] >= 7 and np.isfinite(transform[:7]).all():
+                    # PhysX tensors use [x, y, z, qx, qy, qz, qw].
+                    return np.asarray(
+                        [
+                            transform[0],
+                            transform[1],
+                            transform[2],
+                            transform[6],
+                            transform[3],
+                            transform[4],
+                            transform[5],
+                        ],
+                        dtype=np.float32,
+                    )
+            except Exception:
+                # Initialization order and older Isaac versions may not expose
+                # link tensors yet.  Keep the USD fallback below available.
+                pass
+
         link_prim = self._find_link_prim_by_name(link_name)
         if link_prim is None:
             raise ValueError(f"Cannot find link '{link_name}' under articulation root {self._prim_path}")
@@ -404,9 +526,7 @@ class ArticulationObject(SingleArticulation):
 
         for prim in Usd.PrimRange(root_prim):
             if not (
-                prim.IsA(UsdPhysics.PrismaticJoint)
-                or prim.IsA(UsdPhysics.RevoluteJoint)
-                or prim.IsA(UsdPhysics.Joint)
+                prim.IsA(UsdPhysics.PrismaticJoint) or prim.IsA(UsdPhysics.RevoluteJoint) or prim.IsA(UsdPhysics.Joint)
             ):
                 continue
             drive_type = self._get_joint_drive_type(prim)

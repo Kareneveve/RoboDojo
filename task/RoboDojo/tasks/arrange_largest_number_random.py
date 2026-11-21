@@ -126,7 +126,7 @@ class ArrangeLargestNumberCommon:
             "upright reading direction. Correct any initial skew; do not leave any digit skewed, sideways, or "
             "upside down, even when rotation leaves its appearance unchanged, and do not turn a digit into a "
             "different number by rotating it. Release all digit tiles, fully open both grippers and return both "
-            "arms to their initial poses. arrange_largest_number_random uses the same description.\n"
+            "arms to their initial poses.\n"
             "\n"
             "## Scoring\n"
             "\n"

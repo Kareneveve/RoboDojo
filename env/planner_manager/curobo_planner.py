@@ -1,4 +1,6 @@
 from copy import deepcopy
+import os
+from pathlib import Path
 
 from curobo.batch_motion_planner import BatchMotionPlanner, MotionPlannerCfg
 from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
@@ -425,6 +427,19 @@ class CuroboPlanner:
     def _build_robot_and_scene_cfg(self, yml_data, table_height):
         """Translate a Maniverse-style yml into v2 robot_cfg + scene_model."""
         kinematics = deepcopy(yml_data.get("robot_cfg", {}).get("kinematics", {}))
+        # Older exported Curobo files contain absolute paths from the machine
+        # that generated the asset. Resolve a missing path relative to the
+        # robot directory that owns the loaded planner file.
+        planner_asset_root = Path(self.yml_path).resolve().parent
+        configured_asset_root = kinematics.get("asset_root_path")
+        if configured_asset_root and not os.path.isdir(configured_asset_root):
+            if planner_asset_root.is_dir():
+                kinematics["asset_root_path"] = str(planner_asset_root)
+        configured_urdf = kinematics.get("urdf_path")
+        if configured_urdf and not os.path.isfile(configured_urdf):
+            local_urdf = planner_asset_root / Path(configured_urdf).name
+            if local_urdf.is_file():
+                kinematics["urdf_path"] = str(local_urdf)
         ee_link = kinematics.get("ee_link", None)
         tool_frames = kinematics.get("tool_frames", None)
         if tool_frames is None:

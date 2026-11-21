@@ -4,8 +4,9 @@ from typing import Any, Dict, Literal
 
 import carb
 import isaacsim.core.utils.stage as stage_utils
-from pxr import PhysxSchema, Usd, UsdPhysics, UsdShade
+from pxr import PhysxSchema, UsdPhysics, UsdShade
 
+from env.scene_manager.objects.physics_utils import get_or_apply_api
 from utils.usd_schema import safe_set_attribute_on_schema
 
 
@@ -55,15 +56,10 @@ class PhysicsMaterial:
         self._prim = stage.GetPrimAtPath(prim_path)
 
         # Apply UsdPhysics.MaterialAPI for basic properties
-        if self._prim.HasAPI(UsdPhysics.MaterialAPI):
-            self._material_api = UsdPhysics.MaterialAPI(self._prim)
-        else:
-            self._material_api = UsdPhysics.MaterialAPI.Apply(self._prim)
+        self._material_api = get_or_apply_api(self._prim, UsdPhysics.MaterialAPI)
 
         # Apply PhysxSchema.PhysxMaterialAPI for extended properties
-        self._physx_material_api = PhysxSchema.PhysxMaterialAPI(self._prim)
-        if not self._physx_material_api:
-            self._physx_material_api = PhysxSchema.PhysxMaterialAPI.Apply(self._prim)
+        self._physx_material_api = get_or_apply_api(self._prim, PhysxSchema.PhysxMaterialAPI)
 
         # Load from config if provided (takes precedence)
         if config:

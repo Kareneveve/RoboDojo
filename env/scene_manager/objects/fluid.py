@@ -126,6 +126,19 @@ class FluidObject:
         cloud_points = cloud_points_base * self.visual_scale
         fluid_rest_offset = inst_particle_system_cfg.get("fluid_rest_offset", 0.0135)
         particleSpacing = 2.0 * fluid_rest_offset
+        particle_material_cfg = self.physics_cfg.get("particle_material", {})
+        configured_density = particle_material_cfg.get("density")
+        if configured_density is None:
+            # Accept the flat layout spelling used by older fluid metadata.
+            configured_density = self.physics_cfg.get("density")
+        try:
+            configured_density = float(configured_density)
+        except (TypeError, ValueError):
+            configured_density = 1000.0
+        if not np.isfinite(configured_density) or configured_density <= 0.0:
+            configured_density = 1000.0
+        self.particle_density = configured_density
+        self.particle_mass = configured_density * particleSpacing**3
         self.init_particle_positions, self.init_particle_velocities = generate_particles_in_convex_mesh(
             vertices=cloud_points, sphere_diameter=particleSpacing
         )
@@ -142,7 +155,7 @@ class FluidObject:
             self_collision=True,
             fluid=True,
             particle_group=0,
-            particle_mass=0.0005,
+            particle_mass=self.particle_mass,
             density=0.0,
         )
 

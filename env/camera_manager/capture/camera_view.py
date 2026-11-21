@@ -173,7 +173,7 @@ class CameraView(XFormPrim):
         prim_paths_expr: str = None,
         name: str = "camera_prim_view",
         camera_resolution: Tuple[int, int] = (256, 256),
-        output_annotators: List[str] | None = ["rgb", "depth"],
+        output_annotators: List[str] | None = None,
         positions: np.ndarray | torch.Tensor | wp.array | None = None,
         translations: np.ndarray | torch.Tensor | wp.array | None = None,
         orientations: np.ndarray | torch.Tensor | wp.array | None = None,
@@ -192,7 +192,7 @@ class CameraView(XFormPrim):
             visibilities=visibilities,
             reset_xform_properties=reset_xform_properties,
         )
-        self._output_annotators = output_annotators
+        self._output_annotators = ["rgb", "depth"] if output_annotators is None else list(output_annotators)
         self._annotators = dict()
         self.camera_resolution = camera_resolution
         self._tiled_render_product = None

@@ -14,6 +14,15 @@ import torch
 
 from env.scene_manager.layout_manager import LayoutManager
 from env.scene_manager.objects.physics_material import PhysicsMaterial
+from env.scene_manager.objects.physics_utils import (
+    enable_collision_tree,
+    enable_contact_report,
+    get_or_apply_api,
+    set_kinematic_body,
+)
+
+MIN_RIGID_MASS = 0.05
+MAX_RIGID_MASS = 0.5
 
 
 class RigidObject(SingleRigidPrim, SingleGeometryPrim):
@@ -67,7 +76,7 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         # Keep a positive fallback during construction because the USD mass
         # API is inspected below, before the PhysX view is initialized.
         configured_mass = self.physics_config.get("mass", None)
-        self.mass = float(configured_mass) if configured_mass is not None else 0.5
+        self.mass = self._clamp_mass(configured_mass if configured_mass is not None else MAX_RIGID_MASS)
         self.visible = self.visual_config.get("visible", True)
 
         self.physics_material_path = find_unique_string_name(
@@ -78,59 +87,50 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
             prim_path=self.physics_material_path,
             static_friction=self.physics_config.get(
                 "static_friction",
-                self.physics_config.get("friction", 0.6),
+                0.5,
             ),
             dynamic_friction=self.physics_config.get(
                 "dynamic_friction",
-                self.physics_config.get("friction", 1.5),
+                0.5,
             ),
             restitution=self.physics_config.get("restitution", 0.0),
             config=self.physics_config,
         )
 
-        mass_api = (
-            UsdPhysics.MassAPI(prim)
-            if prim.HasAPI(UsdPhysics.MassAPI)
-            else UsdPhysics.MassAPI.Apply(prim)
-        )
+        mass_api = get_or_apply_api(prim, UsdPhysics.MassAPI)
         authored_mass = mass_api.GetMassAttr().Get()
         authored_diagonal_inertia = mass_api.GetDiagonalInertiaAttr().Get()
         self._authored_mass_before_override = float(authored_mass) if authored_mass is not None else None
         self._authored_diagonal_inertia_before_override = (
-            np.asarray(authored_diagonal_inertia, dtype=np.float32)
-            if authored_diagonal_inertia is not None
-            else None
+            np.asarray(authored_diagonal_inertia, dtype=np.float32) if authored_diagonal_inertia is not None else None
         )
         mass_api.CreateMassAttr().Set(self.mass)
-        if (
-            self._authored_mass_before_override
-            and self._authored_diagonal_inertia_before_override is not None
-        ):
+        if self._authored_mass_before_override and self._authored_diagonal_inertia_before_override is not None:
             inertia_scale = self.mass / self._authored_mass_before_override
             scaled_diagonal_inertia = self._authored_diagonal_inertia_before_override * inertia_scale
             mass_api.GetDiagonalInertiaAttr().Set(Gf.Vec3f(*scaled_diagonal_inertia.tolist()))
 
         # Write the USD binding before either base class can flush a newly created PhysX handle.
         # If an actor already exists before this wrapper is constructed, it must be created pre-reset.
-        if prim.HasAPI(UsdShade.MaterialBindingAPI):
-            material_binding = UsdShade.MaterialBindingAPI(prim)
-        else:
-            material_binding = UsdShade.MaterialBindingAPI.Apply(prim)
+        material_binding = get_or_apply_api(prim, UsdShade.MaterialBindingAPI)
         material_binding.Bind(
             self.physics_material.material,
             bindingStrength=UsdShade.Tokens.strongerThanDescendants,
             materialPurpose="physics",
         )
 
+        collision = bool(self.physics_config.get("collision", False))
         SingleGeometryPrim.__init__(
             self,
             prim_path=prim_path,
             name=self.instance_name,
             scale=self.scale,
             visible=self.visible,
-            collision=False,
+            collision=collision,
             track_contact_forces=False,
         )
+        if collision:
+            enable_collision_tree(prim)
 
         SingleRigidPrim.__init__(
             self,
@@ -140,10 +140,16 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
             orientation=self.default_ori,
             scale=self.scale,
         )
+        root_prim = self.stage.GetPrimAtPath(self._prim_path)
+        if self.physics_config.get("kinematic", False):
+            set_kinematic_body(root_prim)
+        if self.physics_config.get("contact_report", False):
+            # Dynamic bodies report contacts on the rigid-body prim.
+            enable_contact_report(root_prim, threshold=0.0, include_colliders=False)
         self._mass_api_prim = self._find_mass_api_prim()
         self._asset_mass = self._read_asset_mass()
         if configured_mass is None and self._asset_mass is not None and self._asset_mass > 0:
-            self.mass = float(self._asset_mass)
+            self.mass = self._clamp_mass(self._asset_mass)
         self._asset_diagonal_inertia = self._read_asset_diagonal_inertia()
         self._asset_center_of_mass = self._read_mass_attribute("GetCenterOfMassAttr")
         self._asset_principal_axes = self._read_mass_attribute("GetPrincipalAxesAttr")
@@ -266,6 +272,8 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
     @staticmethod
     def _inertia_matrix_to_usd_attributes(inertia_matrix):
         """Convert a body-frame inertia matrix to USD principal inertia attributes."""
+        if hasattr(inertia_matrix, "detach"):
+            inertia_matrix = inertia_matrix.detach().cpu().numpy()
         inertia_matrix = np.asarray(inertia_matrix, dtype=np.float64).reshape(3, 3)
         inertia_matrix = 0.5 * (inertia_matrix + inertia_matrix.T)
         diagonal_inertia, principal_axes = np.linalg.eigh(inertia_matrix)
@@ -343,7 +351,10 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
                 mass_api.CreateDiagonalInertiaAttr().Set(target_diagonal_inertia)
                 mass_api.CreatePrincipalAxesAttr().Set(target_principal_axes)
                 com_positions, _ = view.get_coms()
-                center_of_mass = np.asarray(com_positions[0], dtype=np.float32).reshape(-1)[:3]
+                center_of_mass = com_positions[0]
+                if hasattr(center_of_mass, "detach"):
+                    center_of_mass = center_of_mass.detach().cpu().numpy()
+                center_of_mass = np.asarray(center_of_mass, dtype=np.float32).reshape(-1)[:3]
                 mass_api.CreateCenterOfMassAttr().Set(Gf.Vec3f(*[float(value) for value in center_of_mass]))
 
         self._mass_inertia_synced = True
@@ -424,18 +435,12 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
 
     def set_mass(self, mass: float) -> None:
         """Set mass and scale inertia consistently for this rigid body."""
-        mass = float(mass)
-        if mass <= 0.0:
-            mass = 0.05
+        mass = self._clamp_mass(mass)
 
         rigid_view = getattr(self, "_rigid_prim_view", None)
         if rigid_view is None or not rigid_view.is_physics_handle_valid():
             prim = self.stage.GetPrimAtPath(self._prim_path)
-            mass_api = (
-                UsdPhysics.MassAPI(prim)
-                if prim.HasAPI(UsdPhysics.MassAPI)
-                else UsdPhysics.MassAPI.Apply(prim)
-            )
+            mass_api = get_or_apply_api(prim, UsdPhysics.MassAPI)
             previous_mass = mass_api.GetMassAttr().Get()
             previous_inertia = mass_api.GetDiagonalInertiaAttr().Get()
             SingleRigidPrim.set_mass(self, mass)
@@ -455,16 +460,17 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
             rigid_view.set_inertias(inertia_values)
 
         prim = self.stage.GetPrimAtPath(self._prim_path)
-        mass_api = (
-            UsdPhysics.MassAPI(prim)
-            if prim.HasAPI(UsdPhysics.MassAPI)
-            else UsdPhysics.MassAPI.Apply(prim)
-        )
+        mass_api = get_or_apply_api(prim, UsdPhysics.MassAPI)
         mass_api.CreateMassAttr().Set(mass)
         if previous_mass > 0.0:
             diagonal_inertia = np.diag(inertia_values[0].reshape(3, 3))
             mass_api.GetDiagonalInertiaAttr().Set(Gf.Vec3f(*diagonal_inertia.tolist()))
         self.mass = mass
+
+    @staticmethod
+    def _clamp_mass(mass: float) -> float:
+        """Keep rigid-object mass within the benchmark's supported range."""
+        return min(max(float(mass), MIN_RIGID_MASS), MAX_RIGID_MASS)
 
     def _apply_mass_and_inertia(self):
         """Apply configured mass and keep the runtime inertia consistent with it."""
@@ -486,10 +492,7 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
             reference_mass = self._authored_mass_before_override
 
         inertia_scale = self.mass / reference_mass if reference_mass > 0.0 else 1.0
-        if (
-            self._authored_diagonal_inertia_before_override is not None
-            and self._authored_mass_before_override
-        ):
+        if self._authored_diagonal_inertia_before_override is not None and self._authored_mass_before_override:
             expected_diagonal_inertia = self._authored_diagonal_inertia_before_override * inertia_scale
             current_diagonal_inertia = np.diag(inertia_values[0].reshape(3, 3))
             if np.allclose(current_diagonal_inertia, expected_diagonal_inertia, rtol=1e-4, atol=1e-6):
@@ -499,10 +502,7 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         if reference_mass > 0.0:
             rigid_view.set_inertias(inertia_values * inertia_scale)
 
-            if (
-                self._authored_diagonal_inertia_before_override is not None
-                and self._authored_mass_before_override
-            ):
+            if self._authored_diagonal_inertia_before_override is not None and self._authored_mass_before_override:
                 mass_api = UsdPhysics.MassAPI(self.stage.GetPrimAtPath(self._prim_path))
                 scaled_diagonal_inertia = self._authored_diagonal_inertia_before_override * (
                     self.mass / self._authored_mass_before_override

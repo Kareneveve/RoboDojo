@@ -64,7 +64,7 @@ class SortNestingDollsBySizeCommon:
             "neighboring dolls greater than 3 cm, and keep the front-to-back distance between the frontmost and "
             "rearmost doll centers less than 3.5 cm. Correct any doll that is out of order, tilted, or displaced "
             "after release. Once all dolls are correctly arranged and stable, fully open both grippers and return "
-            "both arms to their initial poses. sort_nesting_dolls_by_size_random uses the same description.\n"
+            "both arms to their initial poses.\n"
             "\n"
             "## Scoring\n"
             "\n"
