@@ -23,10 +23,16 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from env.scene_manager.contact_monitor import get_env_origin, to_numpy
+from env.scene_manager.contact_monitor import (
+    CONTACT_PROCESSING_SETTING as CONTACT_PROCESSING_SETTING,
+    acquire_contact_processing,
+    ensure_contact_processing_enabled,
+    get_env_origin,
+    release_contact_processing,
+    to_numpy,
+)
 
 DEFAULT_MIN_CONTACT_IMPULSE = 1e-5  # N·s per contact point
-CONTACT_PROCESSING_SETTING = "/physics/disableContactProcessing"
 
 
 class PlacementContactMonitor:
@@ -46,7 +52,7 @@ class PlacementContactMonitor:
         self.robot_manager = None
         self._sim = None
         self._previous_post_physics_step_callback = None
-        self._previous_contact_setting = None
+        self._reporting_acquired = False
         self._bound = False
         self._clear_state()
 
@@ -195,21 +201,16 @@ class PlacementContactMonitor:
         self._support_points: list[dict[str, list[np.ndarray]]] = [{} for _ in range(self.num_envs)]
 
     def _enable_reporting(self):
-        import carb
-
-        settings = carb.settings.get_settings()
-        if self._previous_contact_setting is None:
-            previous = settings.get(CONTACT_PROCESSING_SETTING)
-            self._previous_contact_setting = True if previous is None else bool(previous)
-        settings.set_bool(CONTACT_PROCESSING_SETTING, False)
+        if self._reporting_acquired:
+            ensure_contact_processing_enabled()
+        else:
+            self._reporting_acquired = acquire_contact_processing()
 
     def _restore_reporting(self):
-        if self._previous_contact_setting is None:
+        if not self._reporting_acquired:
             return
-        import carb
-
-        carb.settings.get_settings().set_bool(CONTACT_PROCESSING_SETTING, self._previous_contact_setting)
-        self._previous_contact_setting = None
+        self._reporting_acquired = False
+        release_contact_processing()
 
     def _find_actor(self, path: str):
         while path:

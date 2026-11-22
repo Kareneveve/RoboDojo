@@ -602,19 +602,22 @@ class RewardManager:
                     reward_lst[env_idx] = 0.0
                     break
 
-        if any(
+        has_any_score = any(
             self.score_meta[env_idx]["mode"] is not None or self.final_score_meta[env_idx]["mode"] is not None
-            for env_idx in env_idx_list
-        ):
-            # A batched evaluator may finalize one environment while other
-            # environments continue running.  Recomputing the cache from a
-            # partial reward vector must not overwrite the completed envs'
-            # scores with zero.
-            gated_scores = self.get_score(reward_lst=reward_lst)
-            if self._gated_score_lst is None:
-                self._gated_score_lst = [0.0 for _ in range(self.num_envs)]
-            for env_idx in env_idx_list:
-                self._gated_score_lst[env_idx] = gated_scores[env_idx]
+            for env_idx in range(self.num_envs)
+        )
+        if has_any_score:
+            if env_idx_list:
+                # A batched evaluator may finalize one environment while other
+                # environments continue running.  Recomputing the cache from a
+                # partial reward vector must not overwrite the completed envs'
+                # scores with zero, and an empty active list must preserve the
+                # cached scores of already-finished environments.
+                gated_scores = self.get_score(reward_lst=reward_lst)
+                if self._gated_score_lst is None:
+                    self._gated_score_lst = [0.0 for _ in range(self.num_envs)]
+                for env_idx in env_idx_list:
+                    self._gated_score_lst[env_idx] = gated_scores[env_idx]
         else:
             self._gated_score_lst = None
 
@@ -725,10 +728,15 @@ class RewardManager:
         force_threshold=0.0,
         A_functional_tag=None,
         B_functional_tag=None,
+        B_bbox_functional_tag=None,
+        B_bbox_margin=0.002,
         contact_point_tolerance=0.015,
         contact_point_z_tolerance=0.012,
         min_downward_speed=None,
         require_contact_onset=False,
+        onset_prev_force_threshold=0.0,
+        z_lower=None,
+        z_upper=None,
     ):
         args = {
             "label_A": label_A,
@@ -736,10 +744,15 @@ class RewardManager:
             "force_threshold": force_threshold,
             "A_functional_tag": A_functional_tag,
             "B_functional_tag": B_functional_tag,
+            "B_bbox_functional_tag": B_bbox_functional_tag,
+            "B_bbox_margin": B_bbox_margin,
             "contact_point_tolerance": contact_point_tolerance,
             "contact_point_z_tolerance": contact_point_z_tolerance,
             "min_downward_speed": min_downward_speed,
             "require_contact_onset": require_contact_onset,
+            "onset_prev_force_threshold": onset_prev_force_threshold,
+            "z_lower": z_lower,
+            "z_upper": z_upper,
         }
         return ("is_A_contact_force_above_threshold", args)
 

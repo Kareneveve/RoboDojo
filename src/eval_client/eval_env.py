@@ -300,6 +300,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 if idx % 5 == 0:
                     self.obs_manager.render_for_capture()
                     self.obs_manager.get_obs()
+            if self.contact_monitor is not None:
+                self.contact_monitor.clear_buffers()
             if self.physx_monitor_enabled:
                 self._check_physx_broken_envs()
 
@@ -392,8 +394,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             return action_type[0]
 
         def take_action(self, action):
-            self.validate_action_dict(action)
-            self.take_action_batch([action], env_idx_list=[0])
+            normalized = self.validate_action_dict(action)
+            self.take_action_batch([normalized], env_idx_list=[0])
 
         def take_action_batch(self, actions_list, env_idx_list=None):
             if self.physx_monitor_enabled:
@@ -406,10 +408,13 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 raise ValueError(
                     f"actions_list length {len(actions_list)} does not match env_idx_list length {len(env_idx_list)}"
                 )
+            validated_actions = []
             for idx, env_idx in enumerate(env_idx_list):
-                action = actions_list[idx]
-                self.validate_action_dict(action)
-                action_type = self.get_action_type(action)
+                normalized_action = self.validate_action_dict(actions_list[idx])
+                action_type = self.get_action_type(normalized_action)
+                validated_actions.append((env_idx, normalized_action, action_type))
+
+            for env_idx, action, action_type in validated_actions:
                 if self.take_action_cnt[env_idx] == self.step_lim or self.end_flag[env_idx]:
                     continue
 
@@ -609,19 +614,43 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
             return control_info_list
 
-        def validate_action_dict(self, action_dict: dict) -> None:
-            """Validate that a policy action dict uses the expected per-arm keys
-            and per-key dimensions for this robot.
+        @staticmethod
+        def _has_bool_or_non_real_numeric(obj) -> bool:
+            if isinstance(obj, (bool, np.bool_)):
+                return True
+            if isinstance(obj, (int, float, np.integer, np.floating)):
+                return False
+            if isinstance(obj, np.ndarray):
+                if obj.dtype == np.bool_:
+                    return True
+                if obj.dtype == object:
+                    return any(EvalEnv._has_bool_or_non_real_numeric(x) for x in obj.flat)
+                return not (np.issubdtype(obj.dtype, np.integer) or np.issubdtype(obj.dtype, np.floating))
+            if isinstance(obj, (list, tuple)):
+                return any(EvalEnv._has_bool_or_non_real_numeric(x) for x in obj)
+            return True
+
+        def validate_action_dict(self, action_dict: dict) -> dict:
+            """Validate and normalize a policy action dict for this robot.
 
             Args:
                 action_dict: action mapping returned by the policy. For a
                     single arm, use ``arm_joint_state`` or ``arm_ee_pose``.
                     Dual-arm targets use ``left_`` and ``right_`` prefixes.
 
+            Returns:
+                Normalized dict mapping each required key to a 1D float64
+                ``np.ndarray``.
+
             Raises:
-                ValueError: unexpected keys, forbidden prefixes, or wrong dimensions.
-                TypeError: a value is not array-like.
+                ValueError: unexpected keys, forbidden prefixes, wrong
+                    dimensions, non-finite values, or zero-norm quaternions.
+                TypeError: ``action_dict`` is not a dict or a value is not a
+                    real-numeric array-like (e.g. strings or booleans).
             """
+            if not isinstance(action_dict, dict):
+                raise TypeError(f"action_dict must be a dict, got {type(action_dict)}")
+
             arm_dims = deepcopy(self.robot_action_dim_info["arm_dim"])
             ee_dims = deepcopy(self.robot_action_dim_info["ee_dim"])
 
@@ -639,6 +668,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             expected = {}
             joint_keys = []
             ee_keys = []
+            ee_pose_keys = set()
             for index, robot in enumerate(target_robots):
                 arm_key = self.robot_manager.process_name(robot.arm_name)
                 gripper_key = self.robot_manager.process_name(robot.gripper_name)
@@ -646,6 +676,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 expected.update({arm_key: arm_dims[index], gripper_key: ee_dims[index], pose_key: 7})
                 joint_keys.extend((arm_key, gripper_key))
                 ee_keys.extend((pose_key, gripper_key))
+                ee_pose_keys.add(pose_key)
 
             unexpected_keys = [k for k in action_dict if k not in expected]
             if unexpected_keys:
@@ -665,6 +696,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             if extra_keys:
                 raise ValueError(f"Action mixes unsupported keys for this action type: {extra_keys}")
 
+            normalized = {}
             for key, expected_dim in expected.items():
                 if key not in required_keys:
                     continue
@@ -672,6 +704,9 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
                 if not isinstance(value, (np.ndarray, list, tuple)):
                     raise TypeError(f"action_dict['{key}'] must be array-like, got {type(value)}")
+
+                if self._has_bool_or_non_real_numeric(value):
+                    raise TypeError(f"action_dict['{key}'] must contain real numeric values (no bool/str)")
 
                 try:
                     arr = np.asarray(value, dtype=float)
@@ -687,6 +722,17 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     )
                 if not np.isfinite(arr).all():
                     raise ValueError(f"action_dict['{key}'] must contain only finite values")
+
+                if key in ee_pose_keys:
+                    quat_norm = float(np.linalg.norm(arr[3:7]))
+                    if quat_norm <= 1e-6:
+                        raise ValueError(
+                            f"action_dict['{key}'] quaternion must have non-zero norm, got {arr[3:7].tolist()}"
+                        )
+
+                normalized[key] = arr
+
+            return normalized
 
         def step(self, env_idx_list, decimation=1):
             meta_control_list = self.robot_manager.control_manager.pop(env_idx_list)
@@ -781,7 +827,11 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             if monitor.is_fatal():
                 raise self._PhysXFatalError(monitor.get_fatal_message())
             bad = monitor.get_broken_envs()
-            new_bad = {i for i in bad if i < self.num_envs and not self.end_flag[i]}
+            active_slots = getattr(self, "current_env_seed_map", None)
+            if active_slots:
+                new_bad = {i for i in bad if i in active_slots and not self.end_flag[i]}
+            else:
+                new_bad = {i for i in bad if i < self.num_envs and not self.end_flag[i]}
             if new_bad:
                 raise self._PhysXBrokenError(new_bad)
 
@@ -858,7 +908,13 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     self.end_flag[env_idx] = True
                     self.success[env_idx] = final_rewards[env_idx] > 1 - 1e-3
             success = 0
-            process_scores = self.reward_manager.get_score() if hasattr(self, "get_score") else None
+            process_scores = (
+                self.reward_manager.get_score(
+                    reward_lst=[1.0 if self.success[env_idx] else 0.0 for env_idx in range(self.num_envs)]
+                )
+                if hasattr(self, "get_score")
+                else None
+            )
             recorded = 0
             for env_idx in batch_envs:
                 index = self.success_nums + self.fail_nums + recorded
@@ -946,8 +1002,10 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 print(f"[EvalEnv] persist_resume_manifest after batch failure failed: {persist_error}")
 
         def is_episode_end(self):
-            pre_end_flag = deepcopy(self.end_flag)
             active_envs = [env_idx for env_idx in range(self.num_envs) if not self.end_flag[env_idx]]
+            if not active_envs:
+                return True
+            pre_end_flag = deepcopy(self.end_flag)
             final_envs = [
                 env_idx
                 for env_idx in active_envs

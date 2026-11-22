@@ -94,6 +94,7 @@ class SceneManager:
         self._background: Background | None = None
         self.background_prim_path = "/World/background"
         self.pending_initialization = []
+        self.setup_scene = False
         # Per-label ``physics`` overrides merged into instance configs right
         # before object creation (see ``set_physics_overrides``).
         self.physics_overrides: Dict[str, Dict[str, Any]] = {}
@@ -173,8 +174,9 @@ class SceneManager:
     def post_init(self):
         """Post-initialization logic.
         Initialize objects created in the initialize() method here.
-        For CUDA devices, initialize rigid and articulation objects here.
+        For CUDA devices, initialize rigid, articulation, and kinematic geometry objects here.
         """
+        initialized = set()
         for env_id in range(self.num_envs):
             # Initialize rigid and articulation objects
             for obj_dict in [
@@ -183,6 +185,16 @@ class SceneManager:
             ]:
                 for obj in obj_dict.values():
                     obj.initialize()
+                    initialized.add(id(obj))
+            if self.device.type == "cuda":
+                for obj in self._geometry_objects[env_id].values():
+                    if self._is_kinematic_geometry(obj):
+                        obj.initialize()
+                        initialized.add(id(obj))
+        if initialized:
+            self.pending_initialization = [
+                obj for obj in self.pending_initialization if id(obj) not in initialized
+            ]
 
     def _set_env_seed(self, env_id: int):
         if self._seeds_per_env is None:
@@ -194,7 +206,8 @@ class SceneManager:
     def reload_scene(self):
         """Reload all environments from saved eval layouts."""
         print("[INFO] Resetting all environments")
-        self.post_init()
+        if self.setup_scene:
+            self.post_init()
         env_ids = torch.arange(self.num_envs, device=self.device)
         self.reload_envs(env_ids)
         self.setup_scene = False
@@ -281,6 +294,10 @@ class SceneManager:
         self.clear_scene_objects(env_id, exclude_types=persistent_types)
         self.spawn_scene_objects(env_id)
 
+    @staticmethod
+    def _is_kinematic_geometry(obj: Any) -> bool:
+        return isinstance(obj, GeometryObject) and bool(getattr(obj, "physics_config", {}).get("kinematic", False))
+
     def _persistent_object_types(self) -> tuple[str, ...]:
         """Object types whose prims are kept (relocated, not deleted) on reload.
 
@@ -296,6 +313,8 @@ class SceneManager:
             return self._rigid_and_dynamic_objects
         if obj_type == "articulation":
             return self._articulation_objects
+        if obj_type == "geometry":
+            return self._geometry_objects
         return None
 
     def _park_persistent_objects(self, env_id: int):
@@ -306,6 +325,12 @@ class SceneManager:
             for inst_name, obj in list(registry.items()):
                 parked[inst_name] = (obj_type, obj)
                 del registry[inst_name]
+        if self.device.type == "cuda":
+            geo_registry = self._geometry_objects[env_id]
+            for inst_name, obj in list(geo_registry.items()):
+                if self._is_kinematic_geometry(obj):
+                    parked[inst_name] = ("geometry", obj)
+                    del geo_registry[inst_name]
         for _, obj in parked.values():
             obj.relocate_offscreen()
 
@@ -395,7 +420,8 @@ class SceneManager:
 
             # A persistent object reused for this record already exists; only
             # its saved layout pose changes.
-            registry = self._registry_for_type(obj_type) if obj_type in self._persistent_object_types() else None
+            is_persistent_record = obj_type in self._persistent_object_types() or spawn_kinematic_geometry
+            registry = self._registry_for_type(obj_type) if is_persistent_record else None
             existing = registry[env_id].get(inst_name) if registry is not None else None
             if existing is not None:
                 self._refresh_saved_layout(existing, default_pos, default_ori, scale)
@@ -730,6 +756,8 @@ class SceneManager:
 
     def close(self):
         self.layout_manager.close()
+        self.pending_initialization.clear()
+        self.setup_scene = False
         for env_id in range(self.num_envs):
             self.clear_scene_objects(env_id)
             for _, obj in self._parked_objects[env_id].values():
@@ -761,10 +789,15 @@ class SceneManager:
             (self._fluid_objects[env_id], "fluid"),
         ]
 
-        collections_to_clear = [obj_dict for obj_dict, obj_type in all_collections if obj_type not in exclude_types]
+        collections_to_clear = [
+            (obj_dict, obj_type) for obj_dict, obj_type in all_collections if obj_type not in exclude_types
+        ]
 
-        for obj_dict in collections_to_clear:
+        preserve_kinematic_geometry = self.device.type == "cuda" and "rigid" in exclude_types
+        for obj_dict, obj_type in collections_to_clear:
             for obj_key, obj in list(obj_dict.items()):
+                if preserve_kinematic_geometry and obj_type == "geometry" and self._is_kinematic_geometry(obj):
+                    continue
                 self.delete_scene_object(obj)
                 del obj_dict[obj_key]
 

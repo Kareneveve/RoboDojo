@@ -36,8 +36,29 @@ def enable_collision_tree(root_prim):
         UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr().Set(True)
 
 
+def disable_nested_rigid_bodies(root_prim):
+    """Disable and remove redundant ``RigidBodyAPI`` schemas on descendants of ``root_prim``.
+
+    Some referenced rigid-body USD assets carry authored ``RigidBodyAPI``
+    schemas on child prims (e.g. ``visual``, ``collision``, or mesh sub-nodes).
+    When the wrapper also authors a root rigid body on ``root_prim``, PhysX
+    rejects the hierarchy with ``missing xformstack reset``.  Removing the
+    descendant rigid-body APIs lets all descendant colliders merge cleanly into
+    the single root rigid body.
+    """
+    if root_prim is None or not root_prim.IsValid():
+        return
+    for prim in Usd.PrimRange(root_prim):
+        if prim == root_prim or prim.IsInstanceProxy():
+            continue
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            UsdPhysics.RigidBodyAPI(prim).CreateRigidBodyEnabledAttr().Set(False)
+            prim.RemoveAPI(UsdPhysics.RigidBodyAPI)
+
+
 def set_kinematic_body(prim):
     """Author an enabled kinematic rigid body on ``prim``."""
+    disable_nested_rigid_bodies(prim)
     rigid_body_api = get_or_apply_api(prim, UsdPhysics.RigidBodyAPI)
     rigid_body_api.CreateRigidBodyEnabledAttr().Set(True)
     rigid_body_api.CreateKinematicEnabledAttr().Set(True)

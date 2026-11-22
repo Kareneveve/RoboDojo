@@ -24,12 +24,67 @@ unit tests without a running simulator.
 
 from collections.abc import Iterable
 from itertools import combinations
+import threading
 
 import numpy as np
 
 DEFAULT_MAX_SAMPLES = 128
 DEFAULT_MAX_CONTACT_COUNT = 256
+CONTACT_PROCESSING_SETTING = "/physics/disableContactProcessing"
 _EMPTY_CONTACTS = (np.zeros((0, 3), dtype=float), np.zeros(0, dtype=float))
+_CONTACT_PROCESSING_LOCK = threading.Lock()
+_CONTACT_PROCESSING_REFCOUNT = 0
+_SAVED_CONTACT_PROCESSING_SETTING = None
+
+
+def _get_carb_settings():
+    """Return the Carb settings interface when running inside Isaac Sim."""
+    try:
+        import carb
+
+        return carb.settings.get_settings()
+    except Exception:
+        return None
+
+
+def acquire_contact_processing() -> bool:
+    """Enable PhysX contact processing with process-wide reference counting."""
+    global _CONTACT_PROCESSING_REFCOUNT, _SAVED_CONTACT_PROCESSING_SETTING
+    settings = _get_carb_settings()
+    if settings is None:
+        return False
+    with _CONTACT_PROCESSING_LOCK:
+        if _CONTACT_PROCESSING_REFCOUNT == 0:
+            previous = settings.get(CONTACT_PROCESSING_SETTING)
+            _SAVED_CONTACT_PROCESSING_SETTING = True if previous is None else bool(previous)
+        _CONTACT_PROCESSING_REFCOUNT += 1
+        settings.set_bool(CONTACT_PROCESSING_SETTING, False)
+    return True
+
+
+def ensure_contact_processing_enabled() -> None:
+    """Ensure contact processing stays enabled without changing the refcount."""
+    settings = _get_carb_settings()
+    if settings is not None:
+        settings.set_bool(CONTACT_PROCESSING_SETTING, False)
+
+
+def release_contact_processing() -> None:
+    """Release a contact-processing hold and restore the original setting when idle."""
+    global _CONTACT_PROCESSING_REFCOUNT, _SAVED_CONTACT_PROCESSING_SETTING
+    with _CONTACT_PROCESSING_LOCK:
+        if _CONTACT_PROCESSING_REFCOUNT <= 0:
+            _CONTACT_PROCESSING_REFCOUNT = 0
+            return
+        _CONTACT_PROCESSING_REFCOUNT -= 1
+        if _CONTACT_PROCESSING_REFCOUNT > 0:
+            return
+        saved = _SAVED_CONTACT_PROCESSING_SETTING
+        _SAVED_CONTACT_PROCESSING_SETTING = None
+    if saved is not None:
+        settings = _get_carb_settings()
+        if settings is not None:
+            settings.set_bool(CONTACT_PROCESSING_SETTING, saved)
 
 
 def to_numpy(value, dtype=float):
@@ -70,6 +125,9 @@ def quat_wxyz_to_matrix(quat):
 
 def create_contact_view(prim_path_A, prim_path_B, name, max_contact_count=DEFAULT_MAX_CONTACT_COUNT):
     """Create and initialize a ``RigidContactView`` of A filtered against B."""
+    settings = _get_carb_settings()
+    if settings is not None:
+        settings.set_bool(CONTACT_PROCESSING_SETTING, False)
     from isaacsim.core.api.sensors import RigidContactView
     from isaacsim.core.simulation_manager import SimulationManager
 
@@ -116,6 +174,35 @@ def read_contact_points(contact_view, dt, env_origin=None):
     return positions, normal_forces
 
 
+def read_contact_separations(contact_view, dt):
+    """Read PhysX contact separations for the first sensor/filter pair.
+
+    Isaac Sim exposes contact distances as the fourth item returned by
+    ``RigidContactView.get_contact_force_data``.  A negative value means that
+    the reported contact shapes overlap at the sampled solver step.  Older
+    Isaac Sim versions may omit this item, in which case ``None`` is
+    returned.  The pair-count slice mirrors :func:`read_contact_points` so a
+    stale contact from another sensor pair is never attributed to this pair.
+    """
+    try:
+        contact_data = contact_view.get_contact_force_data(dt=dt)
+    except Exception:
+        return None
+    if contact_data is None or len(contact_data) < 4:
+        return None
+    separations = to_numpy(contact_data[3]).reshape(-1)
+    if len(contact_data) < 6:
+        return separations
+    pair_counts = to_numpy(contact_data[4]).astype(int, copy=False).reshape(-1)
+    pair_starts = to_numpy(contact_data[5]).astype(int, copy=False).reshape(-1)
+    if pair_counts.size == 0 or pair_starts.size == 0:
+        return np.zeros(0, dtype=float)
+    pair_count, pair_start = int(pair_counts[0]), int(pair_starts[0])
+    if pair_count <= 0 or pair_start < 0 or pair_start >= separations.size:
+        return np.zeros(0, dtype=float)
+    return separations[pair_start : min(pair_start + pair_count, separations.size)]
+
+
 def point_velocity(state, point_local):
     """Velocity of a body-frame point from a recorded body state.
 
@@ -148,10 +235,11 @@ class ContactMonitor:
 
         self.scene_manager = None
         self.dt = 1.0 / 60.0
-        self.ready = False
+        self._env_ready: list[bool] = [False] * self.num_envs
         self._sim = None
         self._subscription = None
         self._previous_post_physics_step_callback = None
+        self._reporting_acquired = False
         self._roots: dict[str, tuple[int, str]] = {}
         self._objects: dict[str, list] = {}
         self._com_local: dict[str, list] = {}
@@ -159,15 +247,31 @@ class ContactMonitor:
         self._env_origins: list[np.ndarray | None] = [None] * self.num_envs
         self._clear_buffers()
 
+    @property
+    def ready(self) -> bool:
+        """Return whether at least one environment has resolved its monitored objects."""
+        return any(self._env_ready)
+
+    def is_env_ready(self, env_idx: int) -> bool:
+        """Return whether ``env_idx`` has resolved its monitored objects."""
+        idx = int(env_idx)
+        return 0 <= idx < self.num_envs and self._env_ready[idx]
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
-    def start(self, sim, scene_manager, dt: float | None = None) -> bool:
-        """Subscribe to PhysX contact reports and resolve monitored objects."""
+    def start(self, sim, scene_manager, dt: float | None = None, *, resolve: bool = True) -> bool:
+        """Enable PhysX contact processing, subscribe to reports, and optionally resolve objects.
+
+        Pass ``resolve=False`` when calling before the physics scene is active
+        (e.g. during ``_post_setup_scene`` prior to ``sim.reset()``); objects
+        and contact views will then be resolved on the subsequent ``reset()``.
+        """
         self.stop()
         self.scene_manager = scene_manager
         if dt is not None and np.isfinite(float(dt)) and float(dt) > 0.0:
             self.dt = float(dt)
+        self._enable_reporting()
         try:
             from omni.physx import get_physx_simulation_interface
 
@@ -180,7 +284,8 @@ class ContactMonitor:
         self._sim = sim
         self._previous_post_physics_step_callback = getattr(sim, "post_physics_step_callback", None)
         sim.post_physics_step_callback = self._on_post_physics_step
-        self.reset()
+        if resolve:
+            self.reset()
         return self.ready
 
     def invalidate(self):
@@ -189,26 +294,35 @@ class ContactMonitor:
         Objects may be destroyed and recreated during a reload; until
         ``reset()`` resolves the new ones, nothing is tracked.
         """
-        self.ready = False
+        self._env_ready = [False] * self.num_envs
         self._roots.clear()
         self._objects = {}
         self._com_local = {}
         self._views = [{} for _ in range(self.num_envs)]
         self._clear_buffers()
 
+    def clear_buffers(self):
+        """Clear accumulated contact samples/history without rebuilding views.
+
+        Called after episode settling steps so settling contacts do not pollute
+        step-0 monitoring state.
+        """
+        self._clear_buffers()
+
     def reset(self):
-        """Resolve objects and contact views for the new episode, clear buffers.
+        """Re-enable contact processing, resolve objects/views, and clear buffers.
 
         Prim paths can change between episodes, so they are resolved again.
         """
         self.invalidate()
+        self._enable_reporting()
         if self.scene_manager is None:
             return
-        self.ready = self._register_objects()
+        self._register_objects()
         self._create_views()
 
     def stop(self):
-        """Unsubscribe and restore the previous post-physics-step callback."""
+        """Unsubscribe and restore the previous callback and contact setting."""
         self.invalidate()
         self._subscription = None
         if (
@@ -218,6 +332,7 @@ class ContactMonitor:
             self._sim.post_physics_step_callback = self._previous_post_physics_step_callback
         self._sim = None
         self._previous_post_physics_step_callback = None
+        self._restore_reporting()
 
     # ------------------------------------------------------------------
     # Per-step capture
@@ -252,6 +367,14 @@ class ContactMonitor:
         key = frozenset((str(label_A), str(label_B)))
         return [sample for sample in self._samples[int(env_idx)] if sample["pair"] == key]
 
+    def get_contact_separations(self, env_idx: int, label_A: str, label_B: str):
+        """Return current PhysX separations for a monitored pair when available."""
+        key = frozenset((str(label_A), str(label_B)))
+        view = self._views[int(env_idx)].get(key)
+        if view is None:
+            return None
+        return read_contact_separations(view, self.dt)
+
     def consume_samples(self, env_idx: int, label_A: str, label_B: str):
         """Discard all buffered samples of a pair."""
         key = frozenset((str(label_A), str(label_B)))
@@ -260,7 +383,7 @@ class ContactMonitor:
 
     def has_contacted(self, env_idx: int, label_A: str, label_B: str) -> bool:
         """Return whether ``label_A`` and ``label_B`` have contacted since the last reset."""
-        if not self.ready:
+        if not self.is_env_ready(env_idx):
             return False
         self._sample_completed_step()
         return frozenset((str(label_A), str(label_B))) in self._contacted_pairs[int(env_idx)]
@@ -268,6 +391,18 @@ class ContactMonitor:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+    def _enable_reporting(self):
+        if self._reporting_acquired:
+            ensure_contact_processing_enabled()
+        else:
+            self._reporting_acquired = acquire_contact_processing()
+
+    def _restore_reporting(self):
+        if not self._reporting_acquired:
+            return
+        self._reporting_acquired = False
+        release_contact_processing()
+
     def _clear_buffers(self):
         self._step = 0
         self._sampled_step = 0
@@ -286,14 +421,15 @@ class ContactMonitor:
         return layout_manager.get_scene_object(inst_name=inst_name, env_idx=env_idx)
 
     def _register_objects(self) -> bool:
-        """Resolve monitored objects, their root paths and COM offsets."""
+        """Resolve monitored objects, their root paths and COM offsets per env."""
         env_origins = getattr(self.scene_manager, "env_origins", None)
         self._env_origins = [get_env_origin(env_origins, env_idx) for env_idx in range(self.num_envs)]
         all_labels = tuple(dict.fromkeys(self.labels + self.velocity_labels))
         self._objects = {label: [None] * self.num_envs for label in all_labels}
         self._com_local = {label: [np.zeros(3)] * self.num_envs for label in self.velocity_labels}
-        all_found = True
+        self._env_ready = [False] * self.num_envs
         for env_idx in range(self.num_envs):
+            env_found = True
             for label in all_labels:
                 try:
                     obj = self._get_scene_object(env_idx, label)
@@ -301,14 +437,15 @@ class ContactMonitor:
                     obj = None
                 prim_path = getattr(obj, "usd_prim_path", None) if obj is not None else None
                 if not self._is_valid_prim_path(prim_path):
-                    all_found = False
+                    env_found = False
                     continue
                 self._objects[label][env_idx] = obj
                 if label in self.labels:
                     self._roots[str(prim_path)] = (env_idx, label)
                 if label in self._com_local:
                     self._com_local[label][env_idx] = self._read_com_local(obj)
-        return all_found
+            self._env_ready[env_idx] = env_found
+        return any(self._env_ready)
 
     def _create_views(self):
         for env_idx in range(self.num_envs):
@@ -431,10 +568,16 @@ class ContactMonitor:
 
         for header in contact_headers:
             first = self._resolve_entity(PhysicsSchemaTools.intToSdfPath(header.collider0))
+            if first is None and hasattr(header, "actor0"):
+                first = self._resolve_entity(PhysicsSchemaTools.intToSdfPath(header.actor0))
             second = self._resolve_entity(PhysicsSchemaTools.intToSdfPath(header.collider1))
+            if second is None and hasattr(header, "actor1"):
+                second = self._resolve_entity(PhysicsSchemaTools.intToSdfPath(header.actor1))
             if first is None or second is None or first[0] != second[0] or first[1] == second[1]:
                 continue
             env_idx = first[0]
+            if not self.is_env_ready(env_idx):
+                continue
             key = frozenset((first[1], second[1]))
             self._contacted_pairs[env_idx].add(key)
             count = int(getattr(header, "num_contact_data", 0) or 0)

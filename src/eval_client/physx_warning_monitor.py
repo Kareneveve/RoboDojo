@@ -263,6 +263,7 @@ class PhysXWarningMonitor:
         self._fatal_requires_immediate_shell_restart = False
 
         # fd plumbing
+        self._fd_lock = threading.Lock()
         self._read_fds: list[int] = []
         self._saved_fds: list[int] = []
         self._reader_threads: list[threading.Thread] = []
@@ -477,23 +478,24 @@ class PhysXWarningMonitor:
 
         # 3) For each target fd, build the pipe and remember the saved fd so we
         #    can both echo back to the original terminal/tee AND reattach later.
-        for target_fd in self._TARGET_FDS:
-            r, w = os.pipe()
-            self._enlarge_pipe(r)
-            saved_fd = os.dup(target_fd)
-            os.dup2(w, target_fd)
-            os.close(w)
-            self._saved_fd_by_target[target_fd] = saved_fd
-            self._read_fds.append(r)
-            self._saved_fds.append(saved_fd)
-            self._reader_threads.append(
-                threading.Thread(
-                    target=self._reader_loop,
-                    args=(r, saved_fd, target_fd),
-                    name=f"PhysXWarningMonitor-fd{target_fd}",
-                    daemon=True,
+        with self._fd_lock:
+            for target_fd in self._TARGET_FDS:
+                r, w = os.pipe()
+                self._enlarge_pipe(r)
+                saved_fd = os.dup(target_fd)
+                os.dup2(w, target_fd)
+                os.close(w)
+                self._saved_fd_by_target[target_fd] = saved_fd
+                self._read_fds.append(r)
+                self._saved_fds.append(saved_fd)
+                self._reader_threads.append(
+                    threading.Thread(
+                        target=self._reader_loop,
+                        args=(r, saved_fd, target_fd),
+                        name=f"PhysXWarningMonitor-fd{target_fd}",
+                        daemon=True,
+                    )
                 )
-            )
 
         # 4) Tail watcher reads the mirror file as a redundant detection path.
         self._tail_thread = threading.Thread(
@@ -602,33 +604,36 @@ class PhysXWarningMonitor:
         """Rebuild the pipe for `target_fd` after Kit stole it, then spawn a
         fresh reader thread. Safe to call concurrently for different fds.
         """
-        if self._shutdown:
-            return
-        try:
-            r, w = os.pipe()
-            self._enlarge_pipe(r)
-            # Claim target_fd back. This may race with another Kit dup2 -- if
-            # so, the next EOF will trigger another reattach.
-            os.dup2(w, target_fd)
-            os.close(w)
-        except OSError as e:
+        with self._fd_lock:
+            if self._shutdown:
+                return
+            saved_fd = self._saved_fd_by_target.get(target_fd)
+            if saved_fd is None:
+                # Should not happen; defensive.
+                return
             try:
-                sys.stderr.write(f"[PhysXMonitor] reattach pipe failed: {e}\n")
-            except Exception:
-                pass
-            return
+                r, w = os.pipe()
+                self._enlarge_pipe(r)
+                # Claim target_fd back. This may race with another Kit dup2 -- if
+                # so, the next EOF will trigger another reattach.
+                os.dup2(w, target_fd)
+                os.close(w)
+            except OSError as e:
+                try:
+                    sys.stderr.write(f"[PhysXMonitor] reattach pipe failed: {e}\n")
+                except Exception:
+                    pass
+                return
 
-        saved_fd = self._saved_fd_by_target.get(target_fd)
-        if saved_fd is None:
-            # Should not happen; defensive.
-            return
-
-        threading.Thread(
-            target=self._reader_loop,
-            args=(r, saved_fd, target_fd),
-            name=f"PhysXWarningMonitor-fd{target_fd}-r",
-            daemon=True,
-        ).start()
+            t = threading.Thread(
+                target=self._reader_loop,
+                args=(r, saved_fd, target_fd),
+                name=f"PhysXWarningMonitor-fd{target_fd}-r",
+                daemon=True,
+            )
+            self._read_fds.append(r)
+            self._reader_threads.append(t)
+        t.start()
 
     def _process_log_segment(
         self,
@@ -939,25 +944,62 @@ class PhysXWarningMonitor:
     # Shutdown
     # ------------------------------------------------------------------
 
+    def _close_mirror(self) -> None:
+        with self._lock:
+            try:
+                if self._mirror_fp is not None:
+                    self._mirror_fp.close()
+                    self._mirror_fp = None
+            except Exception:
+                pass
+            try:
+                if self._mirror_path and os.path.exists(self._mirror_path):
+                    os.unlink(self._mirror_path)
+            except Exception:
+                pass
+
+    def restore_stdio(self) -> None:
+        """Restore original stdout/stderr fds before ``os.execv``.
+
+        ``os.pipe()`` creates read ends with ``O_CLOEXEC``, while
+        ``os.dup2(w, 1/2)`` clears ``FD_CLOEXEC`` on fd 1/2.  Calling
+        ``os.execv`` without restoring fd 1/2 leaves the new process writing
+        to a pipe whose read end was closed by the kernel, triggering an
+        immediate ``BrokenPipeError`` (exit code 120).
+        """
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        with self._fd_lock:
+            self._shutdown = True
+            for target_fd, saved_fd in list(self._saved_fd_by_target.items()):
+                try:
+                    os.dup2(saved_fd, target_fd)
+                except OSError:
+                    pass
+            threads = list(self._reader_threads)
+        # Allow reader threads a brief bounded drain into saved_fd after the
+        # pipe write end closes on dup2, before execv closes the read ends.
+        for t in threads:
+            try:
+                if t.is_alive():
+                    t.join(timeout=0.2)
+            except Exception:
+                pass
+        self._close_mirror()
+
     def shutdown(self) -> None:
         """Close the mirror file and unlink it from /dev/shm.
 
         Idempotent; safe to call from both atexit and main.py explicitly.
         """
         if self._shutdown:
+            self._close_mirror()
             return
         self._shutdown = True
-        try:
-            if self._mirror_fp is not None:
-                self._mirror_fp.close()
-                self._mirror_fp = None
-        except Exception:
-            pass
-        try:
-            if self._mirror_path and os.path.exists(self._mirror_path):
-                os.unlink(self._mirror_path)
-        except Exception:
-            pass
+        self._close_mirror()
 
 
 _MONITOR = PhysXWarningMonitor()

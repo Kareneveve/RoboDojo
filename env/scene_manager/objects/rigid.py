@@ -15,6 +15,7 @@ import torch
 from env.scene_manager.layout_manager import LayoutManager
 from env.scene_manager.objects.physics_material import PhysicsMaterial
 from env.scene_manager.objects.physics_utils import (
+    disable_nested_rigid_bodies,
     enable_collision_tree,
     enable_contact_report,
     get_or_apply_api,
@@ -132,6 +133,7 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         if collision:
             enable_collision_tree(prim)
 
+        disable_nested_rigid_bodies(prim)
         SingleRigidPrim.__init__(
             self,
             prim_path=prim_path,

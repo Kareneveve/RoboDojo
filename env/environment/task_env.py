@@ -123,7 +123,7 @@ class TaskEnv(BaseEnv):
     def _post_setup_scene(self, sim):
         self.scene_manager.initialize(sim)
         if self.contact_monitor is not None:
-            self.contact_monitor.start(sim, self.scene_manager, dt=self.dt)
+            self.contact_monitor.start(sim, self.scene_manager, dt=self.dt, resolve=False)
         if self.placement_monitor is not None:
             self.placement_monitor.start(sim, self.scene_manager, self.robot_manager)
         super()._post_setup_scene(sim)

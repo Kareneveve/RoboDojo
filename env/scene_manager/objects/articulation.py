@@ -61,6 +61,11 @@ class ArticulationObject(SingleArticulation):
         self.usd_prim_path = prim_path
         self.usd_path = usd_path
         self.prim_name = prim_path_parts[-1]
+        self._initial_joints_captured = False
+        self.initial_joint_positions = None
+        self.initial_drive_targets = {}
+        self._reset_drive_dof_targets = None
+        self.app = None
         env_id = self._extract_env_id_from_prim_path()
         if env_id is None:
             raise ValueError(f"Could not extract env_id from prim path: {self._prim_path}")
@@ -284,22 +289,27 @@ class ArticulationObject(SingleArticulation):
         self._apply_configured_mass_to_runtime()
         self.upper_joint_positions = self.dof_properties["upper"].copy()
         self.lower_joint_positions = self.dof_properties["lower"].copy()
-        self.initial_joint_positions = self.get_current_joint_positions()
-        self.initial_drive_targets = self._capture_drive_targets()
-        # Restoring the USD targetPosition attribute alone does not reach PhysX once
-        # set_joint_positions() has overwritten the runtime drive target (re-setting an
-        # unchanged USD value emits no change notification), so the joint settles at the
-        # captured, partly sagged pose. Keep the authored targets per DOF, reset positions
-        # to the limit-clipped targets, and push the targets to PhysX on every reset.
-        self._reset_drive_dof_targets = None
-        if self.physics_cfg.get("reset_drive", False):
-            self._reset_drive_dof_targets = self._dof_drive_targets(self.initial_drive_targets)
-            if self._reset_drive_dof_targets is not None:
-                self.initial_joint_positions = np.clip(
-                    self._reset_drive_dof_targets,
-                    self.lower_joint_positions,
-                    self.upper_joint_positions,
-                ).copy()
+        if not getattr(self, "_initial_joints_captured", False):
+            initial_positions = self.get_current_joint_positions()
+            self.initial_joint_positions = (
+                initial_positions.clone() if hasattr(initial_positions, "clone") else np.array(initial_positions, copy=True)
+            )
+            self.initial_drive_targets = self._capture_drive_targets()
+            # Restoring the USD targetPosition attribute alone does not reach PhysX once
+            # set_joint_positions() has overwritten the runtime drive target (re-setting an
+            # unchanged USD value emits no change notification), so the joint settles at the
+            # captured, partly sagged pose. Keep the authored targets per DOF, reset positions
+            # to the limit-clipped targets, and push the targets to PhysX on every reset.
+            self._reset_drive_dof_targets = None
+            if self.physics_cfg.get("reset_drive", False):
+                self._reset_drive_dof_targets = self._dof_drive_targets(self.initial_drive_targets)
+                if self._reset_drive_dof_targets is not None:
+                    self.initial_joint_positions = np.clip(
+                        self._reset_drive_dof_targets,
+                        self.lower_joint_positions,
+                        self.upper_joint_positions,
+                    ).copy()
+            self._initial_joints_captured = True
         self.app = omni.kit.app.get_app()
         self.app.update()
 
@@ -309,25 +319,34 @@ class ArticulationObject(SingleArticulation):
         articulation_view = getattr(self, "_articulation_view", None)
         if target_mass is None or articulation_view is None:
             return
-        masses = articulation_view.get_body_masses()
-        if masses is None:
+        raw_masses = articulation_view.get_body_masses()
+        if raw_masses is None:
             raise RuntimeError(f"Unable to read PhysX link masses for articulation {self._prim_path}")
-        if hasattr(masses, "detach"):
-            masses = masses.detach().cpu().numpy()
+        is_tensor = isinstance(raw_masses, torch.Tensor)
+        masses = raw_masses.detach().cpu().numpy() if is_tensor else raw_masses
         masses_np = np.asarray(masses, dtype=np.float64)
         if masses_np.ndim == 1:
             masses_np = masses_np.reshape(1, -1)
         total_mass = float(masses_np[0].sum())
         if not np.isfinite(total_mass) or total_mass <= 0.0:
             raise RuntimeError(f"Invalid PhysX link masses for articulation {self._prim_path}: {masses_np}")
-        masses_np[0] *= target_mass / total_mass
-        articulation_view.set_body_masses(masses_np)
+        scale = target_mass / total_mass
+        masses_np[0] *= scale
+        if is_tensor:
+            scaled_masses = torch.as_tensor(
+                masses_np, dtype=raw_masses.dtype, device=getattr(raw_masses, "device", "cpu")
+            ).reshape(raw_masses.shape)
+            articulation_view.set_body_masses(scaled_masses)
+        else:
+            articulation_view.set_body_masses(masses_np.reshape(np.asarray(masses).shape))
         readback = articulation_view.get_body_masses()
         if readback is None:
             raise RuntimeError(f"Unable to read back PhysX link masses for articulation {self._prim_path}")
         if hasattr(readback, "detach"):
             readback = readback.detach().cpu().numpy()
         readback_np = np.asarray(readback, dtype=np.float64)
+        if readback_np.ndim == 1:
+            readback_np = readback_np.reshape(1, -1)
         readback_total = float(readback_np[0].sum())
         if not np.isfinite(readback_total) or not np.isclose(readback_total, target_mass, rtol=1e-3, atol=1e-5):
             raise RuntimeError(
@@ -354,16 +373,19 @@ class ArticulationObject(SingleArticulation):
         return None
 
     def apply_saved_pose(self):
-        self.set_current_joint_positions(self.initial_joint_positions)
-        if self.physics_cfg.get("reset_drive", False):
+        if self.initial_joint_positions is not None:
+            self.set_current_joint_positions(self.initial_joint_positions)
+        if self.physics_cfg.get("reset_drive", False) and self.initial_drive_targets:
             self.reset_drive_targets()
         pos = self.default_pos
         ori = self.default_ori
         scale = self.init_scale
         self.set_local_pose(pos, ori)
         self.set_local_scale(np.array(scale))
-        self._apply_default_velocities()
-        self.app.update()
+        if getattr(self, "handles_initialized", True):
+            self._apply_default_velocities()
+        if self.app is not None:
+            self.app.update()
         visible = self.visual_cfg.get("visible", True)
         imageable = UsdGeom.Imageable(self.prim)
         if imageable:
@@ -380,15 +402,18 @@ class ArticulationObject(SingleArticulation):
             _FAR_CENTER[1] + random.uniform(-_FAR_JITTER, _FAR_JITTER),
             _FAR_CENTER[2] + random.uniform(-_FAR_JITTER, _FAR_JITTER),
         )
-        self.set_current_joint_positions(self.initial_joint_positions)
-        if self.physics_cfg.get("reset_drive", False):
+        if self.initial_joint_positions is not None:
+            self.set_current_joint_positions(self.initial_joint_positions)
+        if self.physics_cfg.get("reset_drive", False) and self.initial_drive_targets:
             self.reset_drive_targets()
         ori = self.default_ori
         scale = self.init_scale
         self.set_local_pose(pos, ori)
         self.set_local_scale(np.array(scale))
-        self._apply_default_velocities()
-        self.app.update()
+        if getattr(self, "handles_initialized", True):
+            self._apply_default_velocities()
+        if self.app is not None:
+            self.app.update()
         visible = self.visual_cfg.get("visible", True)
         imageable = UsdGeom.Imageable(self.prim)
         if imageable:
@@ -545,7 +570,7 @@ class ArticulationObject(SingleArticulation):
 
     def reset_drive_targets(self):
         """Reset every joint's DriveAPI target position back to its initial value."""
-        for path, value in self.initial_drive_targets.items():
+        for path, value in (self.initial_drive_targets or {}).items():
             joint_prim = get_prim_at_path(path)
             if joint_prim is None or not joint_prim.IsValid():
                 continue

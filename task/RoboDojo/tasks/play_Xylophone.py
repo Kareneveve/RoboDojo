@@ -16,13 +16,16 @@ STRIKE_Z_LOWER = 0.01
 STRIKE_Z_UPPER = 0.036
 LIFT_HEIGHT = 0.025
 
-# Both strike participants need real colliders and contact reports.  The
+# Both strike participants need contact reports.  The mallet asset already
+# authors its dynamic convex collision approximation; adding collision=True
+# would force triangle-mesh collision onto its visual submeshes.  The
 # xylophone stays fixed as a kinematic body so PhysX (including GPU contact
 # views) resolves mallet contacts against it.
 PHYSICS_OVERRIDES = {
-    "mallet": {"collision": True, "contact_report": True},
+    "mallet": {"contact_report": True},
     "xylophone": {"collision": True, "kinematic": True, "contact_report": True},
 }
+ONSET_PREV_FORCE_THRESHOLD = 0.5
 
 
 class PlayXylophoneCommon:
@@ -42,38 +45,25 @@ class PlayXylophoneCommon:
         self.reward_manager.reset()
 
     def _strike_checks(self, key_idx):
-        """Mallet head centered over key ``key_idx`` at strike height with a real head/key impact."""
+        """Mallet head over key ``key_idx`` at strike height with a real head/key impact."""
         rm = self.reward_manager
         return [
-            rm.is_A_functional_point_center_in_B_functional_bbox(
-                label_A="mallet",
-                label_B="xylophone",
-                A_functional_tag="beat",
-                B_functional_tag=f"bbox_{key_idx}",
-                B_z_functional_tag=f"hit_{key_idx}",
-                z_upper=STRIKE_Z_UPPER,
-                z_lower=STRIKE_Z_LOWER,
-            ),
-            rm.is_A_point_above_B_point_by_z_range(
-                label_A="mallet",
-                label_B="xylophone",
-                A_functional_tag="beat",
-                B_functional_tag=f"hit_{key_idx}",
-                z_upper=STRIKE_Z_UPPER,
-                z_lower=STRIKE_Z_LOWER,
-            ),
             rm.is_A_contact_force_above_threshold(
                 label_A="mallet",
                 label_B="xylophone",
                 force_threshold=MIN_STRIKE_FORCE,
                 A_functional_tag="beat",
                 B_functional_tag=f"hit_{key_idx}",
+                B_bbox_functional_tag=f"bbox_{key_idx}",
                 contact_point_tolerance=HEAD_CONTACT_TOLERANCE,
                 contact_point_z_tolerance=HEAD_CONTACT_Z_TOLERANCE,
                 min_downward_speed=MIN_STRIKE_SPEED,
                 # The head must newly touch the key; a held press or a drag
                 # across keys keeps the contact and does not count.
                 require_contact_onset=True,
+                onset_prev_force_threshold=ONSET_PREV_FORCE_THRESHOLD,
+                z_lower=STRIKE_Z_LOWER,
+                z_upper=STRIKE_Z_UPPER,
             ),
         ]
 

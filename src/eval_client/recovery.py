@@ -47,6 +47,27 @@ def _flush_streams() -> None:
             pass
 
 
+def _restore_monitored_stdio() -> None:
+    """Restore original stdout/stderr fds if PhysXWarningMonitor redirected them.
+
+    Looked up lazily via ``sys.modules`` so this module remains pure stdlib and
+    never triggers simulator imports when monitoring is inactive.
+    """
+    monitor_mod = sys.modules.get("src.eval_client.physx_warning_monitor")
+    if monitor_mod is None:
+        return
+    get_monitor = getattr(monitor_mod, "get_monitor", None)
+    if not callable(get_monitor):
+        return
+    try:
+        monitor = get_monitor()
+        restore = getattr(monitor, "restore_stdio", None)
+        if callable(restore):
+            restore()
+    except Exception:
+        pass
+
+
 def _hard_exit(exit_fn: Callable[[int], Any] | None = None) -> None:
     """Exit without running Python cleanup that may touch the broken runtime."""
 
@@ -94,6 +115,7 @@ def restart_or_exit(
     executable = executable or sys.executable
     argv = list(argv if argv is not None else sys.argv)
     command = [executable, *argv]
+    _restore_monitored_stdio()
     print(f"[FATAL] os.execv self-restart with run_id={os.environ.get(RUN_ID_ENV)}", flush=True)
     _flush_streams()
     try:

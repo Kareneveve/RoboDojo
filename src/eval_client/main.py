@@ -242,6 +242,25 @@ def _restart_or_exit(env, *recovery_args):
     restart_or_exit(env, fatal_msg, max_restarts=MAX_INPROC_RESTARTS)
 
 
+FATAL_INFRA_EXCEPTIONS = (
+    ImportError,
+    ConnectionError,
+    TimeoutError,
+    FileNotFoundError,
+    PermissionError,
+    OSError,
+)
+
+
+def _is_fatal_infra_error(exc: Exception) -> bool:
+    if isinstance(exc, FATAL_INFRA_EXCEPTIONS):
+        return True
+    return any(
+        cls.__module__.startswith("websockets") and cls.__name__ == "WebSocketException"
+        for cls in type(exc).__mro__
+    )
+
+
 def _exit_for_shell_restart(env, fatal_msg):
     """Compatibility wrapper that leaves shell-level recovery to the script."""
 
@@ -370,8 +389,15 @@ def main():
             # A broken episode is part of the requested denominator.  Keep
             # healthy envs for a retry, but do not refill the broken slots with
             # fresh layouts.
-            bad_envs = sorted(e.broken_envs)
-            env.record_batch_failure(e, env_idxs=bad_envs)
+            active_env_slots = set(getattr(env, "current_env_seed_map", {}).keys())
+            active_bad = sorted(i for i in e.broken_envs if i in active_env_slots)
+            if active_bad:
+                bad_envs = active_bad
+                env.record_batch_failure(e, env_idxs=bad_envs)
+            else:
+                bad_envs = None
+                env.record_batch_failure(e)
+                env.seed_manager.eval_step()
 
         except UnStableError as e:
             env.record_batch_failure(e)
@@ -389,7 +415,12 @@ def main():
                 if get_monitor().requires_shell_restart():
                     _exit_for_shell_restart(env, fatal_msg)
                 _restart_or_exit(env, fatal_msg)
-            bad = {i for i in get_monitor().get_broken_envs() if i < env.num_envs} if enable_monitor else set()
+            active_env_slots = set(getattr(env, "current_env_seed_map", {}).keys())
+            bad = (
+                {i for i in get_monitor().get_broken_envs() if i in active_env_slots}
+                if enable_monitor
+                else set()
+            )
             if bad:
                 print(
                     f"[PhysX] downstream exception {type(e).__name__} with "
@@ -397,6 +428,19 @@ def main():
                 )
                 bad_envs = sorted(bad)
                 env.record_batch_failure(e, env_idxs=bad_envs)
+            elif _is_fatal_infra_error(e):
+                print(
+                    f"[Eval] fatal infrastructure error ({type(e).__name__}); aborting evaluation.",
+                    flush=True,
+                )
+                _close_model_client(env)
+                try:
+                    env.close()
+                except Exception:
+                    pass
+                if enable_monitor:
+                    get_monitor().shutdown()
+                raise
             else:
                 try:
                     env.record_batch_failure(e)
@@ -409,6 +453,7 @@ def main():
             # recorded as failed samples and are deliberately not replaced by
             # another layout in the same batch.
             bad_env_set = set(bad_envs)
+            active_bad = bad_env_set & set(env.current_env_seed_map)
             new_batch = [None] * env.num_envs
             for env_idx, seed in env.current_env_seed_map.items():
                 if env_idx not in bad_env_set:
@@ -422,8 +467,8 @@ def main():
                 f"real_remaining={real_remaining}"
             )
             env.close()
-            if real_remaining == 0:
-                print("[PhysX] no real seeds remaining in this batch, advancing.")
+            if real_remaining == 0 or not active_bad:
+                print("[PhysX] no actionable seeds remaining in this batch, advancing.")
                 retry_round = False
             else:
                 retry_round = True
@@ -443,9 +488,11 @@ def main():
 
         env.close()
 
-    _delete_resume_manifest(env)
     _close_model_client(env)
     env.close()
+    _delete_resume_manifest(env)
+    if enable_monitor:
+        get_monitor().shutdown()
     simulation_app.close()
 
 

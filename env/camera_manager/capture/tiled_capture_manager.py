@@ -192,6 +192,26 @@ class TiledCaptureManager:
             data.append(cam_data)
         return data
 
+    def _can_reuse_tiled_cameras(self) -> bool:
+        """Return whether existing tiled cameras match the current camera layout."""
+        cameras = self.camera_manager.cameras
+        if not self.tiled_cameras or not cameras or len(cameras) != self.num_envs:
+            return False
+        num_cams = len(cameras[0])
+        if len(self.tiled_cameras) != num_cams:
+            return False
+        expected_paths = [[camera.prim_path for camera in cameras[env_id]] for env_id in range(self.num_envs)]
+        if expected_paths != self.camera_prim_paths:
+            return False
+        for cam_id, tiled_camera in enumerate(self.tiled_cameras):
+            if tiled_camera is None or getattr(tiled_camera, "_render_product", None) is None:
+                return False
+            camera_resolution = cameras[0][cam_id]._resolution
+            height, width = camera_resolution[1], camera_resolution[0]
+            if list(getattr(tiled_camera, "camera_resolution", ())) != [width, height]:
+                return False
+        return True
+
     def reset(
         self,
     ):
@@ -200,6 +220,10 @@ class TiledCaptureManager:
         Only Hard Reset need which means if we reset simulation backend we need to initialize camera again
         Since Render product change, we also need to attch a new writer maybe
         """
+        if self._can_reuse_tiled_cameras():
+            self.cameras = self.camera_manager.cameras
+            self.camera_names = self.camera_manager.camera_names
+            return
         self.init_cameras()
 
     def destroy(self):
