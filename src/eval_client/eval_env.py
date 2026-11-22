@@ -90,9 +90,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 "additional_info",
                 allow_empty=True,
             )
-            eval_seed_component = safe_path_component(
-                f"{self.eval_seed}_{safe_additional_info}", "eval seed"
-            )
+            eval_seed_component = safe_path_component(f"{self.eval_seed}_{safe_additional_info}", "eval seed")
             expected_parent = Path(
                 "eval_result",
                 f"{BENCHMARK}",
@@ -235,7 +233,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 if seed is None:
                     seed = self.seed_manager.get_seeds(max_count=self.num_envs)
                 seed = [] if seed is None else list(seed)
-            elif isinstance(seed, (int, np.integer)):
+            elif isinstance(seed, int | np.integer):
                 seed = [int(seed)]
             else:
                 try:
@@ -582,13 +580,11 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 key_name = self.robot_manager.process_name(robot.gripper_name)
                 if key_name in control_info.keys() and robot.ee_type == "gripper":
                     position = control_info[key_name]["position"][0]
-                    current_position = self.robot_manager.control_manager.get_last_commanded_gripper(
-                        env_idx, key_name
-                    )
+                    current_position = self.robot_manager.control_manager.get_last_commanded_gripper(env_idx, key_name)
                     if current_position is None:
-                        measured_position = self.robot_manager.get_end_effector_real_val(
-                            robot, env_idx_list=[env_idx]
-                        )[env_idx]
+                        measured_position = self.robot_manager.get_end_effector_real_val(robot, env_idx_list=[env_idx])[
+                            env_idx
+                        ]
                         current_position = measured_position[0] if measured_position is not None else None
                     if current_position is not None:
                         interp_count = int(np.floor(interpolation_nums * 0.8))
@@ -616,9 +612,9 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
         @staticmethod
         def _has_bool_or_non_real_numeric(obj) -> bool:
-            if isinstance(obj, (bool, np.bool_)):
+            if isinstance(obj, bool | np.bool_):
                 return True
-            if isinstance(obj, (int, float, np.integer, np.floating)):
+            if isinstance(obj, int | float | np.integer | np.floating):
                 return False
             if isinstance(obj, np.ndarray):
                 if obj.dtype == np.bool_:
@@ -626,7 +622,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 if obj.dtype == object:
                     return any(EvalEnv._has_bool_or_non_real_numeric(x) for x in obj.flat)
                 return not (np.issubdtype(obj.dtype, np.integer) or np.issubdtype(obj.dtype, np.floating))
-            if isinstance(obj, (list, tuple)):
+            if isinstance(obj, list | tuple):
                 return any(EvalEnv._has_bool_or_non_real_numeric(x) for x in obj)
             return True
 
@@ -702,7 +698,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     continue
                 value = action_dict[key]
 
-                if not isinstance(value, (np.ndarray, list, tuple)):
+                if not isinstance(value, np.ndarray | list | tuple):
                     raise TypeError(f"action_dict['{key}'] must be array-like, got {type(value)}")
 
                 if self._has_bool_or_non_real_numeric(value):
@@ -760,12 +756,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             safe_task_name = safe_path_component(self.task_name, "task_name")
             safe_policy_name = safe_path_component(self.policy_name, "policy_name")
             safe_config_name = safe_path_component(self.config_name, "config_name")
-            safe_additional_info = safe_path_component(
-                self.additional_info, "additional_info", allow_empty=True
-            )
-            eval_seed_component = safe_path_component(
-                f"{self.eval_seed}_{safe_additional_info}", "eval seed"
-            )
+            safe_additional_info = safe_path_component(self.additional_info, "additional_info", allow_empty=True)
+            eval_seed_component = safe_path_component(f"{self.eval_seed}_{safe_additional_info}", "eval seed")
             return os.path.join(
                 "eval_result",
                 f"{BENCHMARK}",
@@ -883,8 +875,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
         def run_eval(self):
             self.run_reward()
-            if hasattr(self, "get_score"):
-                self.get_score()
+            if hasattr(self.reward_manager, "get_score"):
+                self.reward_manager.get_score()
             batch_envs = list(self.current_env_seed_map)
             exist_envs = self.get_running_env_idx_list()
             if exist_envs:
@@ -901,9 +893,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             # sentinel cannot turn an immediate quit into a 100-point episode.
             active_after_policy = [env_idx for env_idx in exist_envs if not self.end_flag[env_idx]]
             if active_after_policy:
-                final_rewards = self.reward_manager.get_reward(
-                    final_check=True, env_idx_list=active_after_policy
-                )
+                final_rewards = self.reward_manager.get_reward(final_check=True, env_idx_list=active_after_policy)
                 for env_idx in active_after_policy:
                     self.end_flag[env_idx] = True
                     self.success[env_idx] = final_rewards[env_idx] > 1 - 1e-3
@@ -912,7 +902,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 self.reward_manager.get_score(
                     reward_lst=[1.0 if self.success[env_idx] else 0.0 for env_idx in range(self.num_envs)]
                 )
-                if hasattr(self, "get_score")
+                if hasattr(self.reward_manager, "get_score")
                 else None
             )
             recorded = 0
@@ -1013,9 +1003,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             ]
             reward_list = self.reward_manager.get_reward(final_check=False, env_idx_list=active_envs)
             if final_envs:
-                final_reward_list = self.reward_manager.get_reward(
-                    final_check=True, env_idx_list=final_envs
-                )
+                final_reward_list = self.reward_manager.get_reward(final_check=True, env_idx_list=final_envs)
                 for env_idx in final_envs:
                     reward_list[env_idx] = final_reward_list[env_idx]
             for env_idx in range(self.num_envs):

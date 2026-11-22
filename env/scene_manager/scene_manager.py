@@ -192,9 +192,7 @@ class SceneManager:
                         obj.initialize()
                         initialized.add(id(obj))
         if initialized:
-            self.pending_initialization = [
-                obj for obj in self.pending_initialization if id(obj) not in initialized
-            ]
+            self.pending_initialization = [obj for obj in self.pending_initialization if id(obj) not in initialized]
 
     def _set_env_seed(self, env_id: int):
         if self._seeds_per_env is None:
@@ -302,10 +300,10 @@ class SceneManager:
         """Object types whose prims are kept (relocated, not deleted) on reload.
 
         Deleting rigid bodies invalidates the GPU PhysX simulation view, so on
-        CUDA rigid objects persist as well as articulations.
+        CUDA rigid and dynamic objects persist as well as articulations.
         """
         if self.device.type == "cuda":
-            return ("rigid", "articulation")
+            return ("rigid", "dynamic", "articulation")
         return ("articulation",)
 
     def _registry_for_type(self, obj_type: str):
@@ -320,10 +318,17 @@ class SceneManager:
     def _park_persistent_objects(self, env_id: int):
         """Move persistent objects of ``env_id`` out of the active registries."""
         parked = self._parked_objects[env_id]
+        visited_registries = set()
         for obj_type in self._persistent_object_types():
             registry = self._registry_for_type(obj_type)[env_id]
+            if id(registry) in visited_registries:
+                continue
+            visited_registries.add(id(registry))
             for inst_name, obj in list(registry.items()):
-                parked[inst_name] = (obj_type, obj)
+                parked_type = (
+                    "dynamic" if obj_type in ("rigid", "dynamic") and isinstance(obj, DynamicObject) else obj_type
+                )
+                parked[inst_name] = (parked_type, obj)
                 del registry[inst_name]
         if self.device.type == "cuda":
             geo_registry = self._geometry_objects[env_id]

@@ -272,15 +272,7 @@ class ContactMonitor:
         if dt is not None and np.isfinite(float(dt)) and float(dt) > 0.0:
             self.dt = float(dt)
         self._enable_reporting()
-        try:
-            from omni.physx import get_physx_simulation_interface
-
-            self._subscription = get_physx_simulation_interface().subscribe_contact_report_events(
-                self._on_contact_report
-            )
-        except Exception as exc:
-            print(f"[ContactMonitor] Failed to subscribe to contact reports: {exc}")
-            self._subscription = None
+        self._subscribe_contact_reports()
         self._sim = sim
         self._previous_post_physics_step_callback = getattr(sim, "post_physics_step_callback", None)
         sim.post_physics_step_callback = self._on_post_physics_step
@@ -316,6 +308,7 @@ class ContactMonitor:
         """
         self.invalidate()
         self._enable_reporting()
+        self._subscribe_contact_reports()
         if self.scene_manager is None:
             return
         self._register_objects()
@@ -396,6 +389,19 @@ class ContactMonitor:
             ensure_contact_processing_enabled()
         else:
             self._reporting_acquired = acquire_contact_processing()
+
+    def _subscribe_contact_reports(self):
+        if self._subscription is not None:
+            return
+        try:
+            from omni.physx import get_physx_simulation_interface
+
+            self._subscription = get_physx_simulation_interface().subscribe_contact_report_events(
+                self._on_contact_report
+            )
+        except Exception as exc:
+            print(f"[ContactMonitor] Failed to subscribe to contact reports: {exc}")
+            self._subscription = None
 
     def _restore_reporting(self):
         if not self._reporting_acquired:
