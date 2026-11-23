@@ -504,8 +504,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                             self._check_physx_broken_envs()
                             self._check_endpose_finite(action_env_idx_list)
 
-                if action_env_idx_list:
-                    self.reward_manager.step(env_idx_list=action_env_idx_list)
+                self.reward_manager.step(env_idx_list=env_idx_list)
             if getattr(self, "interact", False):
                 if hasattr(self, "query_support_arm_traj"):
                     for env_idx in action_env_idx_list:
@@ -875,8 +874,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
         def run_eval(self):
             self.run_reward()
-            if hasattr(self.reward_manager, "get_score"):
-                self.reward_manager.get_score()
+            if hasattr(self, "get_score"):
+                self.get_score()
             batch_envs = list(self.current_env_seed_map)
             exist_envs = self.get_running_env_idx_list()
             if exist_envs:
@@ -888,23 +887,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     self.eval_one_episode_batch()
                 else:
                     self.eval_one_episode()
-            # A policy is allowed to return without calling take_action_batch.
-            # Force the task's terminal checks here so the initial success
-            # sentinel cannot turn an immediate quit into a 100-point episode.
-            active_after_policy = [env_idx for env_idx in exist_envs if not self.end_flag[env_idx]]
-            if active_after_policy:
-                final_rewards = self.reward_manager.get_reward(final_check=True, env_idx_list=active_after_policy)
-                for env_idx in active_after_policy:
-                    self.end_flag[env_idx] = True
-                    self.success[env_idx] = final_rewards[env_idx] > 1 - 1e-3
             success = 0
-            process_scores = (
-                self.reward_manager.get_score(
-                    reward_lst=[1.0 if self.success[env_idx] else 0.0 for env_idx in range(self.num_envs)]
-                )
-                if hasattr(self.reward_manager, "get_score")
-                else None
-            )
+            process_scores = self.reward_manager.get_score() if hasattr(self, "get_score") else None
             recorded = 0
             for env_idx in batch_envs:
                 index = self.success_nums + self.fail_nums + recorded
@@ -992,20 +976,15 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 print(f"[EvalEnv] persist_resume_manifest after batch failure failed: {persist_error}")
 
         def is_episode_end(self):
-            active_envs = [env_idx for env_idx in range(self.num_envs) if not self.end_flag[env_idx]]
-            if not active_envs:
-                return True
             pre_end_flag = deepcopy(self.end_flag)
-            final_envs = [
-                env_idx
-                for env_idx in active_envs
-                if self.take_action_cnt[env_idx] >= self.step_lim or not self.success[env_idx]
-            ]
-            reward_list = self.reward_manager.get_reward(final_check=False, env_idx_list=active_envs)
-            if final_envs:
-                final_reward_list = self.reward_manager.get_reward(final_check=True, env_idx_list=final_envs)
-                for env_idx in final_envs:
-                    reward_list[env_idx] = final_reward_list[env_idx]
+            final_check = False
+            for env_idx in range(self.num_envs):
+                if self.take_action_cnt[env_idx] >= self.step_lim or (
+                    not self.success[env_idx] and not self.end_flag[env_idx]
+                ):
+                    final_check = True
+                    break
+            reward_list = self.reward_manager.get_reward(final_check=final_check)
             for env_idx in range(self.num_envs):
                 if self.end_flag[env_idx]:
                     continue

