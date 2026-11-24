@@ -444,11 +444,7 @@ class RewardManager:
                         cur_status = False
                         break
 
-                should_trigger = (
-                    trigger_mode == "level"
-                    or (trigger_mode == "rising_edge" and cur_status and not pre_status)
-                    or (trigger_mode == "falling_edge" and not cur_status and pre_status)
-                )
+                should_trigger = self._should_trigger(trigger_mode, cur_status, pre_status)
 
                 if should_trigger:
                     success = True
@@ -488,11 +484,7 @@ class RewardManager:
                         cur_status = False
                         break
 
-                should_trigger = (
-                    trigger_mode == "level"
-                    or (trigger_mode == "rising_edge" and cur_status and not pre_status)
-                    or (trigger_mode == "falling_edge" and not cur_status and pre_status)
-                )
+                should_trigger = self._should_trigger(trigger_mode, cur_status, pre_status)
 
                 if should_trigger:
                     success = True
@@ -800,6 +792,7 @@ class RewardManager:
         cavity_margin=0.0,
         max_spill_ratio=None,
         stable_displacement_threshold=0.002,
+        stable_displacement_percentile=95.0,
     ):
         args = {
             "label_A": label_A,
@@ -820,6 +813,7 @@ class RewardManager:
             "cavity_margin": cavity_margin,
             "max_spill_ratio": max_spill_ratio,
             "stable_displacement_threshold": stable_displacement_threshold,
+            "stable_displacement_percentile": stable_displacement_percentile,
         }
         if C_buffer is not None:
             args["C_buffer"] = C_buffer
