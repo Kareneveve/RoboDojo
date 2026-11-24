@@ -875,8 +875,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
         def run_eval(self):
             self.run_reward()
-            if hasattr(self.reward_manager, "get_score"):
-                self.reward_manager.get_score()
+            if hasattr(self, "get_score"):
+                self.get_score()
             batch_envs = list(self.current_env_seed_map)
             exist_envs = self.get_running_env_idx_list()
             if exist_envs:
