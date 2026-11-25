@@ -611,6 +611,47 @@ class Func_Parser:
         center_z = float(pos[2]) + t3d.quaternions.quat2mat(quat)[2] @ local_center
         return float(center_z > table_z + args["min_height"])
 
+    def is_on_table(self, args):
+        """Check that the object rests on the tabletop (XY inside table bounds and bbox bottom near table height)."""
+        layout = self.layout_manager
+        env_idx = args["env_idx"]
+        inst_name = layout.get_instance_name(env_idx, args["label"])
+        table_info = layout.table_info[env_idx] if env_idx < len(layout.table_info) else {}
+        table_z = table_info.get("height")
+        if inst_name is None or table_z is None:
+            return 0.0
+
+        pos, rot = layout.get_instance_pose(env_idx, inst_name=inst_name)
+        bbox = layout.get_instance_bbox_vertices(inst_name=inst_name, env_idx=env_idx)
+        if pos is None or rot is None or bbox is None:
+            return 0.0
+
+        pos = np.asarray(to_numpy(pos), dtype=float).reshape(-1)[:3]
+        rot = np.asarray(to_numpy(rot), dtype=float).reshape(-1)[:4]
+        obj = layout.get_scene_object(env_idx, inst_name)
+        scale = np.asarray(getattr(obj, "scale", [1.0, 1.0, 1.0]), dtype=float).reshape(-1)[:3]
+        scaled_bbox = np.asarray(bbox, dtype=float).reshape(-1, 3) * scale
+
+        _, obj_z_min, _ = calc_polygon(
+            origin_pose=np.concatenate([pos, rot]),
+            origin_bbox_points=scaled_bbox,
+        )
+        z_tolerance = float(args.get("z_tolerance", 0.015))
+        if abs(obj_z_min - float(table_z)) > z_tolerance:
+            return 0.0
+
+        table_pos = table_info.get("pos")
+        table_size = table_info.get("size")
+        if table_pos is not None and table_size is not None and len(table_size) >= 4:
+            x_min = float(table_pos[0]) + float(table_size[0])
+            x_max = float(table_pos[0]) + float(table_size[2])
+            y_min = float(table_pos[1]) + float(table_size[1])
+            y_max = float(table_pos[1]) + float(table_size[3])
+            if not (x_min <= pos[0] <= x_max and y_min <= pos[1] <= y_max):
+                return 0.0
+
+        return 1.0
+
     def is_A_in_B(self, args):
         env_idx = args["env_idx"]
         label_A = args["label_A"]

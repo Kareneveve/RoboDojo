@@ -763,6 +763,9 @@ class RewardManager:
     def is_above_table(self, label, min_height=0.0):
         return ("is_above_table", {"label": label, "min_height": min_height})
 
+    def is_on_table(self, label, z_tolerance=0.015):
+        return ("is_on_table", {"label": label, "z_tolerance": z_tolerance})
+
     def is_A_in_B(self, label_A, label_B):
         args = {"label_A": label_A, "label_B": label_B}
         return ("is_A_in_B", args)
