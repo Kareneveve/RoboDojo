@@ -18,7 +18,21 @@ Dev/
 ignore/
 .cache/
 
+# Local review reports, source checkouts, and supporting artifacts
+/reviews/
+
 # Editor / agent scratch (never committed)
 .cursor/
 .claude/
 Untitled
+
+# Local VLM checkpoints & audit logs
+/checkpoints/
+/eval_vlm_agp/
+/logs/
+reports
+reviews
+
+# Local secrets
+.env
+.env.local

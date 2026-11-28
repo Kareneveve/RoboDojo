@@ -1,13 +1,16 @@
 import argparse
-from datetime import datetime
 import importlib
 import json
 import os
-import sys
 
 from isaaclab.app import AppLauncher
 
-MAX_INPROC_RESTARTS = 3
+from src.eval_client.path_utils import make_run_id, safe_path_component
+from src.eval_client.recovery import (
+    MAX_INPROC_RESTARTS,
+    exit_for_shell_restart,
+    restart_or_exit,
+)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--task_name", type=str)
@@ -69,6 +72,8 @@ from env.global_configs import BENCHMARK, ROOT_DIR
 
 task_registry = importlib.import_module(f"task.{BENCHMARK}.task_registry")
 
+if args_cli.headless:
+    args_cli.video = True
 
 class PhysXBrokenError(Exception):
     pass
@@ -106,7 +111,8 @@ def _physx_monitor_needed(task_name) -> bool:
 # main.py directly we generate one here and propagate it via the
 # environment so subsequent execv calls see the same value.
 if not os.environ.get("ROBODOJO_RUN_ID"):
-    os.environ["ROBODOJO_RUN_ID"] = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    os.environ["ROBODOJO_RUN_ID"] = make_run_id()
+os.environ["ROBODOJO_RUN_ID"] = safe_path_component(os.environ["ROBODOJO_RUN_ID"], "ROBODOJO_RUN_ID")
 
 enable_monitor = _physx_monitor_needed(args_cli.task_name)
 print(f"[main] PhysX monitor enabled={enable_monitor} (task={args_cli.task_name})")
@@ -151,14 +157,24 @@ def _resume_manifest_path(eval_cfg, run_id):
     constructing the env. Keeping the layout aligned avoids drift between
     the writer and reader paths.
     """
+    safe_task_name = safe_path_component(eval_cfg["task_name"], "task_name")
+    safe_policy_name = safe_path_component(eval_cfg["policy_name"], "policy_name")
+    safe_config_name = safe_path_component(eval_cfg["config_name"], "config_name")
+    safe_additional_info = safe_path_component(
+        eval_cfg.get("additional_info", ""), "additional_info", allow_empty=True
+    )
+    safe_run_id = safe_path_component(run_id, "ROBODOJO_RUN_ID")
+    eval_seed_component = safe_path_component(
+        f"{eval_cfg.get('seed', 0)}_{safe_additional_info}", "eval seed"
+    )
     return os.path.join(
         "eval_result",
         BENCHMARK,
-        eval_cfg["task_name"],
-        eval_cfg["policy_name"],
-        eval_cfg["config_name"],
-        f"{eval_cfg.get('seed', 0)}_{eval_cfg.get('additional_info', '')}",
-        f"_resume_{run_id}.json",
+        safe_task_name,
+        safe_policy_name,
+        safe_config_name,
+        eval_seed_component,
+        f"_resume_{safe_run_id}.json",
     )
 
 
@@ -208,47 +224,47 @@ def _close_model_client(env):
         print(f"[main] failed to close model client: {e}")
 
 
-def _restart_or_exit(env, simulation_app, fatal_msg):
-    """Persist progress and either os.execv-restart or sys.exit(99).
+def _restart_or_exit(env, *recovery_args):
+    """Compatibility wrapper around the simulator-independent recovery helper.
 
-    Bounded by ROBODOJO_FATAL_RESTART_COUNT env var so a persistent hardware
-    failure cannot put us in an infinite loop. The bash retry loop in
-    eval_policy.sh provides a second layer of bounded restarts.
+    The current entry point passes ``(env, fatal_msg)``.  The former private
+    helper accepted a now-unused ``simulation_app`` between those arguments,
+    so accepting both forms keeps integrations that call it directly working
+    while ensuring fatal recovery never closes Kit first.
     """
-    restart_count = int(os.environ.get("ROBODOJO_FATAL_RESTART_COUNT", "0")) + 1
-    try:
-        env.persist_resume_manifest(restart_count=restart_count)
-    except Exception as e:
-        print(f"[FATAL] persist_resume_manifest failed: {e}")
-    print(
-        f"[FATAL] PhysX kernel failure detected: {fatal_msg}; persisted manifest. "
-        f"In-process restart attempt {restart_count}/{MAX_INPROC_RESTARTS}."
+
+    if len(recovery_args) == 1:
+        fatal_msg = recovery_args[0]
+    elif len(recovery_args) == 2:
+        _, fatal_msg = recovery_args
+    else:
+        raise TypeError("_restart_or_exit() expects env and fatal message")
+    restart_or_exit(env, fatal_msg, max_restarts=MAX_INPROC_RESTARTS)
+
+
+FATAL_INFRA_EXCEPTIONS = (
+    ImportError,
+    ConnectionError,
+    TimeoutError,
+    FileNotFoundError,
+    PermissionError,
+    OSError,
+)
+
+
+def _is_fatal_infra_error(exc: Exception) -> bool:
+    if isinstance(exc, FATAL_INFRA_EXCEPTIONS):
+        return True
+    return any(
+        cls.__module__.startswith("websockets") and cls.__name__ == "WebSocketException"
+        for cls in type(exc).__mro__
     )
-    try:
-        simulation_app.close()
-    except Exception:
-        pass
-    if restart_count <= MAX_INPROC_RESTARTS:
-        os.environ["ROBODOJO_FATAL_RESTART_COUNT"] = str(restart_count)
-        print(f"[FATAL] os.execv self-restart with run_id={os.environ.get('ROBODOJO_RUN_ID')}")
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-    print(f"[FATAL] in-process restart cap reached ({MAX_INPROC_RESTARTS}); exiting with rc=99 for bash-level retry.")
-    sys.exit(99)
 
 
 def _exit_for_shell_restart(env, fatal_msg):
-    """Persist progress, then let eval_policy.sh restart a fresh process."""
-    restart_count = int(os.environ.get("ROBODOJO_FATAL_RESTART_COUNT", "0"))
-    try:
-        env.persist_resume_manifest(restart_count=restart_count)
-    except Exception as e:
-        print(f"[FATAL] persist_resume_manifest failed: {e}")
-    print(f"[FATAL] PhysX requested shell-level restart: {fatal_msg}; exiting with rc=99 for bash-level retry.")
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(99)
+    """Compatibility wrapper that leaves shell-level recovery to the script."""
+
+    exit_for_shell_restart(env, fatal_msg)
 
 
 def main():
@@ -367,13 +383,24 @@ def main():
                 raise
             if get_monitor().requires_shell_restart():
                 _exit_for_shell_restart(env, str(e))
-            _restart_or_exit(env, simulation_app, str(e))
+            _restart_or_exit(env, str(e))
 
         except PhysXBrokenError as e:
-            # Monitor caught the warning in time.
-            bad_envs = sorted(e.broken_envs)
+            # A broken episode is part of the requested denominator.  Keep
+            # healthy envs for a retry, but do not refill the broken slots with
+            # fresh layouts.
+            active_env_slots = set(getattr(env, "current_env_seed_map", {}).keys())
+            active_bad = sorted(i for i in e.broken_envs if i in active_env_slots)
+            if active_bad:
+                bad_envs = active_bad
+                env.record_batch_failure(e, env_idxs=bad_envs)
+            else:
+                bad_envs = None
+                env.record_batch_failure(e)
+                env.seed_manager.eval_step()
 
-        except UnStableError:
+        except UnStableError as e:
+            env.record_batch_failure(e)
             env.seed_manager.eval_step()
         except Exception as e:
             import traceback
@@ -387,43 +414,61 @@ def main():
                 fatal_msg = get_monitor().get_fatal_message() or str(e)
                 if get_monitor().requires_shell_restart():
                     _exit_for_shell_restart(env, fatal_msg)
-                _restart_or_exit(env, simulation_app, fatal_msg)
-            bad = {i for i in get_monitor().get_broken_envs() if i < env.num_envs} if enable_monitor else set()
+                _restart_or_exit(env, fatal_msg)
+            active_env_slots = set(getattr(env, "current_env_seed_map", {}).keys())
+            bad = (
+                {i for i in get_monitor().get_broken_envs() if i in active_env_slots}
+                if enable_monitor
+                else set()
+            )
             if bad:
                 print(
                     f"[PhysX] downstream exception {type(e).__name__} with "
                     f"monitor broken_envs={sorted(bad)}; treating as PhysX break."
                 )
                 bad_envs = sorted(bad)
+                env.record_batch_failure(e, env_idxs=bad_envs)
+            elif _is_fatal_infra_error(e):
+                print(
+                    f"[Eval] fatal infrastructure error ({type(e).__name__}); aborting evaluation.",
+                    flush=True,
+                )
+                _close_model_client(env)
+                try:
+                    env.close()
+                except Exception:
+                    pass
+                if enable_monitor:
+                    get_monitor().shutdown()
+                raise
             else:
+                try:
+                    env.record_batch_failure(e)
+                except Exception as record_error:
+                    print(f"[Eval] failed to record batch failure: {record_error}", flush=True)
                 env.seed_manager.eval_step()
 
         if bad_envs is not None:
-            # Abandon broken-env seeds, refill from the seed queue, and
-            # retry this round iff there is at least one real seed left.
-            bad_seeds = env.get_seeds_for_envs(bad_envs)
-            env.abandoned_seeds.update(bad_seeds)
-
-            replacements = env.seed_manager.get_seeds(max_count=len(bad_envs)) or []
+            # Keep healthy envs for a retry. Broken-env seeds were already
+            # recorded as failed samples and are deliberately not replaced by
+            # another layout in the same batch.
             bad_env_set = set(bad_envs)
+            active_bad = bad_env_set & set(env.current_env_seed_map)
             new_batch = [None] * env.num_envs
             for env_idx, seed in env.current_env_seed_map.items():
                 if env_idx not in bad_env_set:
                     new_batch[env_idx] = seed
-            for k, env_idx in enumerate(bad_envs):
-                if k < len(replacements):
-                    new_batch[env_idx] = replacements[k]
             env.env_seeds = new_batch
 
             real_remaining = sum(1 for s in env.env_seeds if s is not None)
             print(
-                f"[PhysX] broken envs={bad_envs} -> abandon seeds={sorted(bad_seeds)}; "
-                f"refill from queue={replacements}; new batch={env.env_seeds}; "
+                f"[PhysX] broken envs={bad_envs} counted as failures; "
+                f"no refill; new batch={env.env_seeds}; "
                 f"real_remaining={real_remaining}"
             )
             env.close()
-            if real_remaining == 0:
-                print("[PhysX] no real seeds remaining in this batch, advancing.")
+            if real_remaining == 0 or not active_bad:
+                print("[PhysX] no actionable seeds remaining in this batch, advancing.")
                 retry_round = False
             else:
                 retry_round = True
@@ -443,9 +488,11 @@ def main():
 
         env.close()
 
-    _delete_resume_manifest(env)
     _close_model_client(env)
     env.close()
+    _delete_resume_manifest(env)
+    if enable_monitor:
+        get_monitor().shutdown()
     simulation_app.close()
 
 

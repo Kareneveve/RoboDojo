@@ -16,7 +16,13 @@ Commands:
   smoke       Run selected/all tasks; default sequential, or balanced multi-GPU with --gpu-ids
   benchmark   Run selected/all tasks; default sequential, or balanced multi-GPU with --gpu-ids
   dimensions  List capability dimensions and their runnable tasks
-  summarize   Aggregate eval_result into a markdown summary table
+  summarize       Aggregate eval_result into a markdown summary table
+  rubric-eval     Batch-evaluate eval_result with VLM Rubrics (logs + safe _result.json update)
+  rubric-judge    Grade a single saved run with VLM Rubric using three views
+  rubric-status   Inspect VLM Rubric grading status and backups across eval_result (no API calls)
+  rubric-apply    Apply a completed rubric_eval.json to _result.json
+  rubric-restore  Restore original simulator _result.json from backup
+  rubric-agp      Evaluate RoboDojo_AGP_top10 task runs with VLM Rubrics
 
 Maintainer:
   tasks       Inspect canonical runnable tasks (not needed for normal eval)
@@ -577,6 +583,30 @@ run_summarize() {
   python3 "${ROOT_DIR}/scripts/internal/summarize_result.py" "$@"
 }
 
+run_rubric_judge() {
+  bash "${ROOT_DIR}/scripts/vlm_rubric.sh" judge "$@"
+}
+
+run_rubric_eval() {
+  bash "${ROOT_DIR}/scripts/vlm_rubric.sh" eval "$@"
+}
+
+run_rubric_status() {
+  bash "${ROOT_DIR}/scripts/vlm_rubric.sh" status "$@"
+}
+
+run_rubric_apply() {
+  bash "${ROOT_DIR}/scripts/vlm_rubric.sh" apply "$@"
+}
+
+run_rubric_restore() {
+  bash "${ROOT_DIR}/scripts/vlm_rubric.sh" restore "$@"
+}
+
+run_rubric_agp() {
+  bash "${ROOT_DIR}/scripts/vlm_rubric.sh" agp "$@"
+}
+
 if [[ $# -lt 1 ]]; then
   usage
   exit 2
@@ -595,6 +625,12 @@ case "${command}" in
   smoke) run_sweep smoke "$@" ;;
   benchmark) run_sweep benchmark "$@" ;;
   summarize) run_summarize "$@" ;;
+  rubric-judge) run_rubric_judge "$@" ;;
+  rubric-eval) run_rubric_eval "$@" ;;
+  rubric-status) run_rubric_status "$@" ;;
+  rubric-apply) run_rubric_apply "$@" ;;
+  rubric-restore) run_rubric_restore "$@" ;;
+  rubric-agp) run_rubric_agp "$@" ;;
   -h|--help) usage ;;
   *)
     echo "[robodojo] Unknown command: ${command}" >&2

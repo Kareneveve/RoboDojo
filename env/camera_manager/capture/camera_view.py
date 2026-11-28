@@ -173,7 +173,7 @@ class CameraView(XFormPrim):
         prim_paths_expr: str = None,
         name: str = "camera_prim_view",
         camera_resolution: Tuple[int, int] = (256, 256),
-        output_annotators: List[str] | None = ["rgb", "depth"],
+        output_annotators: List[str] | None = None,
         positions: np.ndarray | torch.Tensor | wp.array | None = None,
         translations: np.ndarray | torch.Tensor | wp.array | None = None,
         orientations: np.ndarray | torch.Tensor | wp.array | None = None,
@@ -192,7 +192,7 @@ class CameraView(XFormPrim):
             visibilities=visibilities,
             reset_xform_properties=reset_xform_properties,
         )
-        self._output_annotators = output_annotators
+        self._output_annotators = ["rgb", "depth"] if output_annotators is None else list(output_annotators)
         self._annotators = dict()
         self.camera_resolution = camera_resolution
         self._tiled_render_product = None
@@ -204,11 +204,20 @@ class CameraView(XFormPrim):
 
     def _clean_up_tiled_sensor(self):
         """Clean up the sensor by detaching annotators and destroying render products, and removing related prims."""
-        if self._tiled_render_product is not None:
-            # detach annotators from render product
-            self._tiled_annotator.detach([self._tiled_render_product.path])
-            # delete tiled render products
-            self._tiled_render_product.destroy()
+        render_product = getattr(self, "_render_product", None) or getattr(self, "_tiled_render_product", None)
+        if render_product is not None:
+            for annotator in getattr(self, "_annotators", {}).values():
+                try:
+                    annotator.detach([render_product.path])
+                except Exception:
+                    pass
+            try:
+                render_product.destroy()
+            except Exception:
+                pass
+        self._annotators.clear()
+        self._render_product = None
+        self._tiled_render_product = None
 
     def _get_tiled_resolution(self, num_cameras, resolution) -> Tuple[int, int]:
         """Calculate the resolution for the tiled sensor based on the number of cameras and individual camera resolution.

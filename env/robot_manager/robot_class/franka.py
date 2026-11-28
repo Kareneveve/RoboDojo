@@ -27,6 +27,9 @@ class Franka:
         self.arm_joints_name = self.robot_args["arm_joints_name"]
         self.gripper_move = self.robot_args["gripper_move"]
         self.gripper_joints_name = self.robot_args["gripper_joints_name"]
+        self.gripper_finger_links = tuple(
+            self.robot_args.get("gripper_finger_links", ("panda_leftfinger", "panda_rightfinger"))
+        )
         self.gripper_bias = self.robot_args["gripper_bias"]
         self.gripper_scale = self.robot_args["gripper_scale"]
         self.base_link = self.robot_args.get("base_link", "panda_link0")

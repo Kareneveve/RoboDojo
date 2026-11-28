@@ -33,7 +33,6 @@ class PushTRandomCommon:
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"
@@ -42,7 +41,7 @@ class PushTRandomCommon:
             "up. Check the alignment of both the stem and crossbar rather than only bringing the block's center "
             "near the target. Correct the remaining position and orientation differences until the block matches "
             "the target outline and stays stable after contact ends. Fully open both grippers and return both "
-            "arms to their initial poses. push_T_random uses the same description.\n"
+            "arms to their initial poses.\n"
             "\n"
             "## Scoring\n"
             "\n"

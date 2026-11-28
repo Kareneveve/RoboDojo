@@ -231,7 +231,6 @@ class HangMugsCommon:
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"
@@ -240,7 +239,7 @@ class HangMugsCommon:
             "leaning against the rack or remaining held by a gripper. Confirm that each mug stays securely "
             "suspended after release before proceeding to the next, and correct any slipping, detachment, or "
             "interference between mugs. Release all mugs, fully open both grippers and return both arms to their "
-            "initial poses. hang_mugs_random uses the same description.\n"
+            "initial poses.\n"
             "\n"
             "## Scoring\n"
             "\n"

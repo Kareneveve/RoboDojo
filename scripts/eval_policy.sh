@@ -135,7 +135,7 @@ done
 # defuse same-second collisions when the same task/config is launched
 # in parallel.
 if [[ -z "${ROBODOJO_RUN_ID:-}" ]]; then
-  export ROBODOJO_RUN_ID="$(date +%Y-%m-%d_%H-%M-%S)"
+  export ROBODOJO_RUN_ID="$(date +%Y-%m-%d_%H-%M-%S)_$$"
 fi
 echo "[eval_policy] ROBODOJO_RUN_ID=${ROBODOJO_RUN_ID}"
 

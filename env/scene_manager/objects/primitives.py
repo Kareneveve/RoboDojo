@@ -12,10 +12,14 @@ class CubeMesh:
     def __init__(
         self,
         prim_path: str,
-        position: Gf.Vec3f = Gf.Vec3f(0.0, 0.0, 0.0),
-        scale: Gf.Vec3f = Gf.Vec3f(1.0, 1.0, 1.0),
+        position: Gf.Vec3f | None = None,
+        scale: Gf.Vec3f | None = None,
         resolution: int = 10,  # resolution is now mapped to tessellation
     ):
+        if position is None:
+            position = Gf.Vec3f(0.0, 0.0, 0.0)
+        if scale is None:
+            scale = Gf.Vec3f(1.0, 1.0, 1.0)
         omni.kit.commands.execute(
             "CreateMeshPrimCommand",
             prim_type="Cube",
@@ -65,11 +69,13 @@ class ConeMesh:
     def __init__(
         self,
         prim_path: str,
-        position: Gf.Vec3f = Gf.Vec3f(0.0, 0.0, 2.0),
+        position: Gf.Vec3f | None = None,
         height: float = 1.0,
         radius: float = 0.5,
         resolution: int = 16,
     ):
+        if position is None:
+            position = Gf.Vec3f(0.0, 0.0, 2.0)
         # A unit cone has radius 0.5 and height 1.0
         omni.kit.commands.execute(
             "CreateMeshPrimCommand",
@@ -93,10 +99,12 @@ class DiskMesh:
     def __init__(
         self,
         prim_path: str,
-        position: Gf.Vec3f = Gf.Vec3f(0.0, 0.0, 2.0),
+        position: Gf.Vec3f | None = None,
         radius: float = 1.0,
         resolution: int = 24,
     ):
+        if position is None:
+            position = Gf.Vec3f(0.0, 0.0, 2.0)
         # A unit disk has a radius of 0.5
         omni.kit.commands.execute(
             "CreateMeshPrimCommand",
@@ -118,11 +126,13 @@ class CylinderMesh:
     def __init__(
         self,
         prim_path: str,
-        position: Gf.Vec3f = Gf.Vec3f(0.0, 0.0, 2.0),
+        position: Gf.Vec3f | None = None,
         height: float = 2.0,
         radius: float = 0.5,
         resolution: int = 24,
     ):
+        if position is None:
+            position = Gf.Vec3f(0.0, 0.0, 2.0)
         # A unit cylinder has radius 0.5 and height 1.0
         omni.kit.commands.execute(
             "CreateMeshPrimCommand",
@@ -144,10 +154,12 @@ class SphereMesh:
     def __init__(
         self,
         prim_path: str,
-        position: Gf.Vec3f = Gf.Vec3f(0.0, 0.0, 2.0),
+        position: Gf.Vec3f | None = None,
         radius: float = 1.0,
         resolution: int = 32,
     ):
+        if position is None:
+            position = Gf.Vec3f(0.0, 0.0, 2.0)
         # A unit sphere has a radius of 0.5
         omni.kit.commands.execute(
             "CreateMeshPrimCommand",
@@ -170,11 +182,13 @@ class TorusMesh:
     def __init__(
         self,
         prim_path: str,
-        position: Gf.Vec3f = Gf.Vec3f(0.0, 0.0, 2.0),
+        position: Gf.Vec3f | None = None,
         major_radius: float = 1.0,
         minor_radius: float = 0.3,  # Note: minor_radius becomes a ratio
         resolution: int = 8,
     ):
+        if position is None:
+            position = Gf.Vec3f(0.0, 0.0, 2.0)
         # The command doesn't directly support major/minor radius.
         # It creates a torus with a fixed ratio. We scale based on major_radius.
         omni.kit.commands.execute(
@@ -203,11 +217,13 @@ class CapsuleMesh:
     def __init__(
         self,
         prim_path: str,
-        position: Gf.Vec3f = Gf.Vec3f(0.0, 0.0, 2.0),
+        position: Gf.Vec3f | None = None,
         height: float = 1.0,
         radius: float = 0.5,
         resolution: int = 16,
     ):
+        if position is None:
+            position = Gf.Vec3f(0.0, 0.0, 2.0)
         current_stage = stage_utils.get_current_stage()
         skin_mesh = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
         if not skin_mesh.GetPath():

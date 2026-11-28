@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from copy import deepcopy
+import os
 from typing import Any, Dict, List
 
 from isaacsim.core.utils.prims import delete_prim, is_prim_path_valid
@@ -77,6 +78,9 @@ class SceneManager:
         self._garment_objects: List[Dict[str, GarmentObject]] = [{} for _ in range(num_envs)]
         self._geometry_objects: List[Dict[str, GeometryObject]] = [{} for _ in range(num_envs)]
         self._fluid_objects: List[Dict[str, FluidObject]] = [{} for _ in range(num_envs)]
+        # Persistent objects (see _persistent_object_types) that the current
+        # layout did not claim: [env_id][inst_name] = (obj_type, object).
+        self._parked_objects: List[Dict[str, tuple]] = [{} for _ in range(num_envs)]
 
         # Rooms and lights remain environment-specific
         self._rooms: List[Room | None] = [None] * num_envs
@@ -90,6 +94,10 @@ class SceneManager:
         self._background: Background | None = None
         self.background_prim_path = "/World/background"
         self.pending_initialization = []
+        self.setup_scene = False
+        # Per-label ``physics`` overrides merged into instance configs right
+        # before object creation (see ``set_physics_overrides``).
+        self.physics_overrides: Dict[str, Dict[str, Any]] = {}
         self.spawnable_object_types = [
             "rigid",
             "articulation",
@@ -97,6 +105,34 @@ class SceneManager:
             "geometry",
             "fluid",
         ]
+
+    def set_physics_overrides(self, overrides: Dict[str, Dict[str, Any]] | None):
+        """Declare per-label ``physics`` overrides for scene objects.
+
+        The overrides are merged into each matching instance config right
+        before its object wrapper is created, on initialization and on every
+        scene reload.  Object wrappers then author the corresponding USD/PhysX
+        properties (see ``env.scene_manager.objects.physics_utils``).
+
+        Example::
+
+            scene_manager.set_physics_overrides(
+                {
+                    "xylophone": {"collision": True, "kinematic": True, "contact_report": True},
+                }
+            )
+        """
+        self.physics_overrides = {str(label): dict(values) for label, values in (overrides or {}).items()}
+
+    def _apply_physics_overrides(self, inst_cfg) -> None:
+        overrides = self.physics_overrides.get(inst_cfg.get("label"))
+        if not overrides:
+            return
+        if inst_cfg.get("physics", None) is None:
+            inst_cfg["physics"] = {}
+        physics_cfg = inst_cfg["physics"]
+        for key, value in overrides.items():
+            physics_cfg[key] = value
 
     def update_env_seeds(self, seeds: Sequence[int] | None):
         """Update per-environment seed list."""
@@ -138,8 +174,9 @@ class SceneManager:
     def post_init(self):
         """Post-initialization logic.
         Initialize objects created in the initialize() method here.
-        For CUDA devices, initialize rigid and articulation objects here.
+        For CUDA devices, initialize rigid, articulation, and kinematic geometry objects here.
         """
+        initialized = set()
         for env_id in range(self.num_envs):
             # Initialize rigid and articulation objects
             for obj_dict in [
@@ -148,6 +185,14 @@ class SceneManager:
             ]:
                 for obj in obj_dict.values():
                     obj.initialize()
+                    initialized.add(id(obj))
+            if self.device.type == "cuda":
+                for obj in self._geometry_objects[env_id].values():
+                    if self._is_kinematic_geometry(obj):
+                        obj.initialize()
+                        initialized.add(id(obj))
+        if initialized:
+            self.pending_initialization = [obj for obj in self.pending_initialization if id(obj) not in initialized]
 
     def _set_env_seed(self, env_id: int):
         if self._seeds_per_env is None:
@@ -159,7 +204,8 @@ class SceneManager:
     def reload_scene(self):
         """Reload all environments from saved eval layouts."""
         print("[INFO] Resetting all environments")
-        self.post_init()
+        if self.setup_scene:
+            self.post_init()
         env_ids = torch.arange(self.num_envs, device=self.device)
         self.reload_envs(env_ids)
         self.setup_scene = False
@@ -227,7 +273,13 @@ class SceneManager:
         Args:
             env_id: ID of the environment to reset
         """
+        persistent_types = list(self._persistent_object_types())
+        self.relocate_stale_objects(env_id, persistent_types)
         if not self.setup_scene:
+            # Persistent objects keep their prims across reloads.  Park them so
+            # the new layout can claim matching assets by name; unclaimed ones
+            # stay parked offscreen and out of the active registries.
+            self._park_persistent_objects(env_id)
             self.config[f"env{env_id}"] = self.layout_manager.load_saved_layout(env_id)
         self.reload_lights(env_id)
         self.reload_ground(env_id)
@@ -235,16 +287,101 @@ class SceneManager:
         self.reload_room(env_id)
         self.reload_table(env_id)
 
+        # Recreate non-persistent objects.  Persistent records either refresh a
+        # reused object's saved pose or spawn a new object for a new asset.
+        self.clear_scene_objects(env_id, exclude_types=persistent_types)
+        self.spawn_scene_objects(env_id)
+
+    @staticmethod
+    def _is_kinematic_geometry(obj: Any) -> bool:
+        return isinstance(obj, GeometryObject) and bool(getattr(obj, "physics_config", {}).get("kinematic", False))
+
+    def _persistent_object_types(self) -> tuple[str, ...]:
+        """Object types whose prims are kept (relocated, not deleted) on reload.
+
+        Deleting rigid bodies invalidates the GPU PhysX simulation view, so on
+        CUDA rigid and dynamic objects persist as well as articulations.
+        """
         if self.device.type == "cuda":
-            self.relocate_stale_objects(env_id, ["rigid", "articulation"])
-            # Clear existing objects (based on exclude_types)
-            self.clear_scene_objects(env_id, exclude_types=["rigid", "articulation"])
-            self.spawn_scene_objects(env_id, exclude_types=["rigid", "articulation"])
+            return ("rigid", "dynamic", "articulation")
+        return ("articulation",)
+
+    def _registry_for_type(self, obj_type: str):
+        if obj_type in ("rigid", "dynamic"):
+            return self._rigid_and_dynamic_objects
+        if obj_type == "articulation":
+            return self._articulation_objects
+        if obj_type == "geometry":
+            return self._geometry_objects
+        return None
+
+    def _park_persistent_objects(self, env_id: int):
+        """Move persistent objects of ``env_id`` out of the active registries."""
+        parked = self._parked_objects[env_id]
+        visited_registries = set()
+        for obj_type in self._persistent_object_types():
+            registry = self._registry_for_type(obj_type)[env_id]
+            if id(registry) in visited_registries:
+                continue
+            visited_registries.add(id(registry))
+            for inst_name, obj in list(registry.items()):
+                parked_type = (
+                    "dynamic" if obj_type in ("rigid", "dynamic") and isinstance(obj, DynamicObject) else obj_type
+                )
+                parked[inst_name] = (parked_type, obj)
+                del registry[inst_name]
+        if self.device.type == "cuda":
+            geo_registry = self._geometry_objects[env_id]
+            for inst_name, obj in list(geo_registry.items()):
+                if self._is_kinematic_geometry(obj):
+                    parked[inst_name] = ("geometry", obj)
+                    del geo_registry[inst_name]
+        for _, obj in parked.values():
+            obj.relocate_offscreen()
+
+    def claim_parked_object(
+        self, env_id: int, obj_type: str, category: str, model_idx: int, usd_path: str | None = None
+    ):
+        """Reactivate a parked object of the same asset for a new layout record.
+
+        Args:
+            env_id: Environment ID.
+            obj_type: Layout section type in lower case (``rigid``, ``articulation``...).
+            category: Asset category name.
+            model_idx: Asset model index within the category.
+            usd_path: Asset USD path of the new record (compared when known).
+
+        Returns:
+            ``(prim_path, inst_name)`` of the reused object, or ``None``.
+        """
+        if env_id >= len(self._parked_objects):
+            return None
+        parked = self._parked_objects[env_id]
+        prefix = f"{category}_{model_idx}_"
+        for inst_name in sorted(parked, key=lambda name: (len(name), name)):
+            parked_type, obj = parked[inst_name]
+            if parked_type != obj_type or not inst_name.startswith(prefix) or not inst_name[len(prefix) :].isdigit():
+                continue
+            path_parts = str(getattr(obj, "usd_prim_path", "")).split("/")
+            if len(path_parts) < 3 or path_parts[-2] != category or path_parts[-3] != obj_type:
+                continue
+            obj_usd_path = getattr(obj, "usd_path", None)
+            if usd_path and obj_usd_path and os.path.normpath(str(obj_usd_path)) != os.path.normpath(str(usd_path)):
+                continue
+            del parked[inst_name]
+            self._registry_for_type(obj_type)[env_id][inst_name] = obj
+            return obj.usd_prim_path, inst_name
+        return None
+
+    @staticmethod
+    def _refresh_saved_layout(obj: Any, default_pos: tuple, default_ori: tuple, scale: tuple):
+        """Point a reused persistent object at the pose of its new layout record."""
+        obj.default_pos = default_pos
+        obj.default_ori = default_ori
+        if hasattr(obj, "init_scale"):
+            obj.init_scale = scale
         else:
-            self.relocate_stale_objects(env_id, ["articulation"])
-            # Clear existing objects (based on exclude_types)
-            self.clear_scene_objects(env_id, exclude_types=["articulation"])
-            self.spawn_scene_objects(env_id, exclude_types=["articulation"])
+            obj.scale = scale
 
     def spawn_category_objects(
         self,
@@ -266,17 +403,34 @@ class SceneManager:
         for i in range(num_per_env):
             inst_cfg = cat_cfg[i]
             deep_resolve_paths(inst_cfg)
+            self._apply_physics_overrides(inst_cfg)
             asset_to_spawn = inst_cfg.get("usd_path", None)
             inst_name = inst_cfg.get("inst_name", None)
             prim_path = inst_cfg.get("prim_path", None)
-            obj_type = inst_cfg.get("physics", {}).get("type", "rigid")
+            physics_cfg = inst_cfg.get("physics", None) or {}
+            obj_type = physics_cfg.get("type", "rigid")
 
-            if obj_type in exclude_types:
+            # CUDA normally creates static geometry only on scene reload.  A
+            # kinematic geometry owns a PhysX rigid body, so it is also created
+            # during initialization, before the GPU simulation views are built.
+            spawn_kinematic_geometry = (
+                self.device.type == "cuda" and obj_type == "geometry" and bool(physics_cfg.get("kinematic", False))
+            )
+            if obj_type in exclude_types and not spawn_kinematic_geometry:
                 continue
 
             default_pos = inst_cfg.get("default_pos", (0.0, 0.0, 0.0))
             default_ori = inst_cfg.get("default_ori", (1.0, 0.0, 0.0, 0.0))
             scale = inst_cfg.get("scale", (1, 1, 1))
+
+            # A persistent object reused for this record already exists; only
+            # its saved layout pose changes.
+            is_persistent_record = obj_type in self._persistent_object_types() or spawn_kinematic_geometry
+            registry = self._registry_for_type(obj_type) if is_persistent_record else None
+            existing = registry[env_id].get(inst_name) if registry is not None else None
+            if existing is not None:
+                self._refresh_saved_layout(existing, default_pos, default_ori, scale)
+                continue
 
             obj = self.create_scene_object(
                 env_id,
@@ -553,7 +707,7 @@ class SceneManager:
         if obj_type == "rigid":
             return RigidObject(
                 env_origin=self.sim.scene.env_origins[env_id],
-                **{k: v for k, v in base_args.items() if k != "primitive_type"},  # RigidObject does not use inst_config
+                **{k: v for k, v in base_args.items() if k != "primitive_type"},
             )
         elif obj_type == "dynamic":
             return DynamicObject(
@@ -607,8 +761,13 @@ class SceneManager:
 
     def close(self):
         self.layout_manager.close()
+        self.pending_initialization.clear()
+        self.setup_scene = False
         for env_id in range(self.num_envs):
             self.clear_scene_objects(env_id)
+            for _, obj in self._parked_objects[env_id].values():
+                self.delete_scene_object(obj)
+            self._parked_objects[env_id].clear()
 
             self._lights[env_id].clear()
             self._rooms[env_id] = None
@@ -635,10 +794,15 @@ class SceneManager:
             (self._fluid_objects[env_id], "fluid"),
         ]
 
-        collections_to_clear = [obj_dict for obj_dict, obj_type in all_collections if obj_type not in exclude_types]
+        collections_to_clear = [
+            (obj_dict, obj_type) for obj_dict, obj_type in all_collections if obj_type not in exclude_types
+        ]
 
-        for obj_dict in collections_to_clear:
+        preserve_kinematic_geometry = self.device.type == "cuda" and "rigid" in exclude_types
+        for obj_dict, obj_type in collections_to_clear:
             for obj_key, obj in list(obj_dict.items()):
+                if preserve_kinematic_geometry and obj_type == "geometry" and self._is_kinematic_geometry(obj):
+                    continue
                 self.delete_scene_object(obj)
                 del obj_dict[obj_key]
 

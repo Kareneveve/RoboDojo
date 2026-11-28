@@ -57,13 +57,10 @@ class InsertKeyCommon:
         )
 
     def gen_instruction(self, env_idx):
-        templates = [
-            "Pick up the key, hand it over to the other hand, insert it into the keyhole, then turn it."
-        ]
+        templates = ["Pick up the key, hand it over to the other hand, insert it into the keyhole, then turn it."]
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"

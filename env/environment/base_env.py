@@ -200,6 +200,21 @@ class BaseEnv(gym.Env):
         self.physics_context = sim.sim.get_physics_context()
 
     def close(self):
+        # IsaacLab's backend owns the timeline STOP subscription.  Closing the
+        # timeline first dispatches that callback while the backend still has
+        # live PhysX views, which can hang or invalidate resources underneath
+        # the backend's own cleanup.  A missing backend means that this env is
+        # already closed, so leave the shared timeline and stage untouched.
+        if self.sim is None:
+            return
+
+        backend = self.sim
+        # Keep the reference on failure so callers can retry cleanup and, more
+        # importantly, do not touch shared simulator state after a failed
+        # backend close.  The backend exception intentionally propagates.
+        backend.close()
+        self.sim = None
+
         try:
             import omni.timeline
 
@@ -208,10 +223,6 @@ class BaseEnv(gym.Env):
             tl.set_current_time(0.0)
         except Exception as e:
             print("[restart] timeline stop/set failed:", e)
-
-        if self.sim is not None:
-            self.sim.close()
-            self.sim = None
 
         try:
             import omni.usd

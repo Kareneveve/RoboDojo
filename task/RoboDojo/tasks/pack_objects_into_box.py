@@ -234,7 +234,6 @@ class PackObjectsIntoBoxCommon:
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"
@@ -247,8 +246,7 @@ class PackObjectsIntoBoxCommon:
             "leaving room for the remaining objects. Every object must fit entirely inside the box and rest on "
             "the box bottom or another stable supporting surface. No object may protrude outside the box or rest "
             "unstably. Once all objects are correctly positioned, oriented, and supported, release all objects, "
-            "fully open both grippers and return both arms to their initial poses. pack_objects_into_box_random "
-            "uses the same description.\n"
+            "fully open both grippers and return both arms to their initial poses.\n"
             "\n"
             "## Scoring\n"
             "\n"

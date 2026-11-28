@@ -68,7 +68,6 @@ class StackBlocksCommon:
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"
@@ -77,8 +76,7 @@ class StackBlocksCommon:
             "stable support between layers. After each placement, check whether the new block is displaced, "
             "tilted, or disturbing the existing structure, and repair any misalignment or collapse before "
             "continuing. Finish with the entire tower standing independently without gripper support. Fully open "
-            "both grippers and return both arms to their initial poses. stack_blocks_random uses the same "
-            "description.\n"
+            "both grippers and return both arms to their initial poses.\n"
             "\n"
             "## Scoring\n"
             "\n"

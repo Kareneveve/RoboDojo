@@ -12,8 +12,14 @@ import numpy as np
 from omegaconf import DictConfig
 import omni.kit.commands
 import omni.usd
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Sdf, UsdGeom, UsdPhysics, UsdShade
 import torch
+
+from env.scene_manager.objects.physics_utils import (
+    enable_collision_tree,
+    enable_contact_report,
+    set_kinematic_body,
+)
 
 
 class GeometryObject(SingleGeometryPrim):
@@ -72,7 +78,11 @@ class GeometryObject(SingleGeometryPrim):
         track_contact_forces = track_forces_val if track_forces_val is not None else False
         prepare_sensor_val = self.physics_config.get("prepare_contact_sensor")
         prepare_contact_sensor = prepare_sensor_val if prepare_sensor_val is not None else False
-        disable_stab_val = self.physics_config.get("disable_stablization")
+        disable_stab_val = self.physics_config.get("disable_stabilization")
+        if disable_stab_val is None:
+            # Isaac Sim's public argument contains this historical spelling.
+            # Accept it as a compatibility alias for existing layouts.
+            disable_stab_val = self.physics_config.get("disable_stablization")
         disable_stablization = disable_stab_val if disable_stab_val is not None else True
         contact_filter_val = self.physics_config.get("contact_filter_prim_paths_expr")
         contact_filter_prim_paths_expr = contact_filter_val if contact_filter_val is not None else []
@@ -102,6 +112,8 @@ class GeometryObject(SingleGeometryPrim):
             contact_filter_prim_paths_expr=contact_filter_prim_paths_expr,
         )
         self._remove_rigid_body_if_exists(prim_path)
+        self._apply_physics_config(prim, collision=collision)
+        self.color_material_path = None
         self._current_color = self.visual_config.get("color", None)
         if self._current_color is not None:
             self._apply_color_material(self._current_color)
@@ -111,6 +123,20 @@ class GeometryObject(SingleGeometryPrim):
                 self._apply_visual_material(self.visual_usd_path)
             elif not usd_path:
                 self._apply_default_material()
+
+    def _apply_physics_config(self, prim, collision: bool):
+        """Author optional physics overrides from ``physics_config`` onto the prim.
+
+        See ``env.scene_manager.objects.physics_utils`` for the supported keys.
+        A kinematic body keeps the geometry fixed while still letting PhysX
+        resolve and report contacts against it (including GPU contact views).
+        """
+        if collision:
+            enable_collision_tree(prim)
+        if self.physics_config.get("kinematic", False):
+            set_kinematic_body(prim)
+        if self.physics_config.get("contact_report", False):
+            enable_contact_report(prim, threshold=0.0, include_colliders=True)
 
     def _remove_rigid_body_if_exists(self, prim_path):
         prim = get_prim_at_path(prim_path)
@@ -272,11 +298,7 @@ class GeometryObject(SingleGeometryPrim):
             orientation = orientation.squeeze()
         root_pose = torch.cat([translation, orientation])
         if is_relative and hasattr(self, "env_origin"):
-            env_origin_tensor = (
-                torch.tensor(self.env_origin, dtype=torch.float32, device=root_pose.device)
-                if isinstance(self.env_origin, np.ndarray)
-                else self.env_origin
-            )
+            env_origin_tensor = torch.as_tensor(self.env_origin, dtype=root_pose.dtype, device=root_pose.device)
             if env_origin_tensor.dim() == 0:
                 env_origin_tensor = env_origin_tensor.unsqueeze(0)
             if env_origin_tensor.shape[0] < 3:

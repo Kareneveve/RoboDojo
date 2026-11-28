@@ -40,7 +40,6 @@ class SweepBlocksRandomCommon:
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"
@@ -50,7 +49,7 @@ class SweepBlocksRandomCommon:
             "object is completely inside and remains contained. At completion, the dustpan must be more than 10 "
             "cm to the left of the brush along the world x-axis, measured between their object origins. Finish "
             "with the dustpan level on the table and positioned to the left of the brush, then fully open both "
-            "grippers and return both arms to their initial poses. sweep_blocks_random uses the same description.\n"
+            "grippers and return both arms to their initial poses.\n"
             "\n"
             "## Scoring\n"
             "\n"

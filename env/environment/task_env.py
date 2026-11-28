@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from typing import Any, List
 
 from env.camera_manager.camera_manager import CameraManager
@@ -9,6 +10,9 @@ from env.scene_manager.scene_manager import SceneManager
 
 class TaskEnv(BaseEnv):
     def __init__(self, config, app, **kwargs):
+        # Optional contact/motion sensors; tasks opt in via enable_*_monitor().
+        self.contact_monitor = None
+        self.placement_monitor = None
         self.sim_config = config.sim
         self.scene_config = config.scene
         self.num_envs = self.sim_config.scene.num_envs
@@ -60,12 +64,68 @@ class TaskEnv(BaseEnv):
             self.device,
         )
 
+    def enable_contact_monitor(self, labels, velocity_labels=(), contact_pairs=None):
+        """Track per-step contacts between ``labels`` and pre-step body states.
+
+        Call from a task ``__init__``.  The monitor is started after the scene
+        is created, re-resolved on every reset, samples every ``sim_step`` and
+        is stopped on ``close``.  Reward predicates read it via
+        ``env.contact_monitor``.  ``contact_pairs`` defaults to every pair of
+        ``labels``.  Contact-report events additionally need the objects to
+        enable contact reporting, e.g. with the ``contact_report`` override.
+        """
+        from env.scene_manager.contact_monitor import ContactMonitor
+
+        self.contact_monitor = ContactMonitor(
+            self.num_envs, labels=labels, velocity_labels=velocity_labels, contact_pairs=contact_pairs
+        )
+        return self.contact_monitor
+
+    def enable_placement_monitor(self, item_supports, min_contact_impulse=1e-5):
+        """Track fingertip grasps and item-support contacts over each action window.
+
+        Call from a task ``__init__``.  The monitor is started after the scene
+        is created, refreshed on every reset, scoped to each action through
+        ``reward_action_context``, and stopped on ``close``.  Monitored items
+        must enable contact reporting via ``SceneManager.set_physics_overrides``.
+        """
+        from env.scene_manager.placement_monitor import PlacementContactMonitor
+
+        self.placement_monitor = PlacementContactMonitor(
+            self.num_envs, item_supports=item_supports, min_contact_impulse=min_contact_impulse
+        )
+        return self.placement_monitor
+
+    @contextmanager
+    def reward_action_context(self, env_idx_list):
+        """Lifecycle hook wrapped around one policy action and its reward step."""
+        if self.placement_monitor is None:
+            yield
+            return
+        self.placement_monitor.begin_action(env_idx_list, ended_flags=getattr(self, "end_flag", None))
+        try:
+            yield
+            reward_manager = getattr(self, "reward_manager", None)
+            func_parser = getattr(reward_manager, "func_parser", None)
+            self.placement_monitor.snapshot_positions(env_idx_list, func_parser)
+        finally:
+            self.placement_monitor.end_action()
+
+    def sim_step(self, render: bool = True):
+        if self.contact_monitor is not None:
+            self.contact_monitor.capture_pre_step()
+        return super().sim_step(render=render)
+
     def _setup_scene(self, sim):
         self.robot_manager.initialize(sim)
         super()._setup_scene(sim)
 
     def _post_setup_scene(self, sim):
         self.scene_manager.initialize(sim)
+        if self.contact_monitor is not None:
+            self.contact_monitor.start(sim, self.scene_manager, dt=self.dt, resolve=False)
+        if self.placement_monitor is not None:
+            self.placement_monitor.start(sim, self.scene_manager, self.robot_manager)
         super()._post_setup_scene(sim)
         self.camera_manager.initialize(sim)
         self.capture_manager.initialize(sim)
@@ -82,17 +142,29 @@ class TaskEnv(BaseEnv):
 
     def reset(self, seed: Any | None = None, options: dict[str, Any] | None = None):
         super().reset(seed=seed, options=options)
+        if self.contact_monitor is not None:
+            self.contact_monitor.invalidate()
+        if self.placement_monitor is not None:
+            self.placement_monitor.invalidate()
         self.scene_manager.reload_scene()
         self.robot_manager.reset()
         for _ in range(300):
             self.sim_step(render=False)
         self.camera_manager.reset()
         self.capture_manager.reset()
+        if self.contact_monitor is not None:
+            self.contact_monitor.reset()
+        if self.placement_monitor is not None:
+            self.placement_monitor.reset()
 
     def step(self, meta_control_list: List[ControlSeq]):
         self.robot_manager.control_robot(meta_control_list=meta_control_list)
 
     def close(self):
+        if self.placement_monitor is not None:
+            self.placement_monitor.stop()
+        if self.contact_monitor is not None:
+            self.contact_monitor.stop()
         self.capture_manager.destroy()
         self.camera_manager.destroy()
         self.robot_manager.close()

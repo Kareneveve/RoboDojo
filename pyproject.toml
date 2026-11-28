@@ -17,6 +17,7 @@ extend-exclude = [
     "eval_result",
     "third_party",
     "XPolicyLab",
+    "Roboscience-BennuFork-XPolicyLab",
     "Assets",
     "logs",
     "scripts/logs",
@@ -43,6 +44,7 @@ ignore = [
 "__init__.py" = ["F401"]
 "src/eval_client/main.py" = ["E402"]  # late first-party imports after AppLauncher bootstrap
 "src/eval_client/eval_env.py" = ["E501"]
+"src/vlm_rubric/rubrics.py" = ["E501"]  # multi-line rubric templates
 "env/**/*.py" = ["E501"]  # oversized modules; split in dedicated refactors
 "task/**/*.py" = ["E501"]  # dense reward expressions; refactor with task helpers later
 "utils/save_file.py" = ["E501"]

